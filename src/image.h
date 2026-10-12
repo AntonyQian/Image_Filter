@@ -1,21 +1,22 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
-void pixel_calculator (int x, int y);
-
-// A grayscale image: one byte per pixel, stored row by row.
-// Pixel (x, y) lives at index  y * width + x.
+// A rectangular grid of 8-bit pixels, stored row by row.
+// Each pixel holds `channels` bytes next to each other (interleaved).
 struct Image {
     int width = 0;
     int height = 0;
     int channels = 1;                 // always 1 for grayscale, kept for later color support
-    std::vector<std::uint8_t> data;   // size should be width * height
-};
+    std::vector<std::uint8_t> data;   // size should be width * height * channels
 
-// TODO: a small helper to get or set a pixel by (x, y) so do not repeat the y * width + x formula everywhere. 
-int inline pixel_index_calculator (int x, int y, int width, int pixel_index){
-    pixel_index = y*width + x;
-    return pixel_index;
-}
+    // The one place the index formula lives: where channel `c` of pixel (x, y)
+    // sits in `data`. For grayscale (channels == 1) this is just y * width + x.
+    // The cast to std::size_t comes first so the multiplication is done in a
+    // wide type and cannot overflow int on very large images.
+    std::size_t index(int x, int y, int c = 0) const {
+        return (static_cast<std::size_t>(y) * width + x) * channels + c;
+    }
+};
