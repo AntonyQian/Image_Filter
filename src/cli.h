@@ -7,7 +7,10 @@
 // The whole command-line tool as an ordinary function, so tests can call it
 // without starting a process. main() only forwards to this.
 //
-// args: the command-line arguments WITHOUT the program name:  input output sigma
+// args: the command-line arguments WITHOUT the program name:
+//         input output sigma [--backend serial|openmp] [--threads N]
+//       Defaults: the openmp Backend, on every thread the OpenMP runtime
+//       offers (omp_get_max_threads).
 // out:  normal output (main passes std::cout)
 // err:  error messages (main passes std::cerr)
 //
