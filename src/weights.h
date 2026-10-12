@@ -26,8 +26,11 @@ struct Weights {
 // A Gaussian is never exactly zero, but beyond 3 sigma it holds less than
 // 0.3% of its area, so the window is cut off there.
 // Expects a valid sigma (finite and greater than zero).
+// Throws std::invalid_argument if sigma is so large that the radius, or the
+// window width 2 * radius + 1, would not fit in an int.
 int radius_for_sigma(double sigma);
 
 // Builds the Weights for one blur.
 // Expects a valid sigma (finite and greater than zero).
+// Throws std::invalid_argument if sigma is too large (see radius_for_sigma).
 Weights make_weights(double sigma);

@@ -414,6 +414,94 @@ static void test_source_file_is_untouched() {
     }
 }
 
+// ---- Bad sigma and tiny images (ticket #10) ----
+
+// Runs the tool with a sigma it must refuse and checks the three things a
+// user would notice: a non-zero exit code, a message on the error stream,
+// and no output file left behind.
+static void check_sigma_is_rejected(const std::string& sigma) {
+    // The same folder is reused for every sigma; temp_dir empties it first,
+    // so an output file left by an earlier case cannot be mistaken for ours.
+    const fs::path dir = temp_dir("rejected_sigma");
+    const std::string input = (dir / "in.png").string();
+    const std::string output = (dir / "out.png").string();
+    save_image(input, make_gradient(5, 3));
+
+    const RunResult result = run_cli({input, output, sigma});
+
+    CHECK(result.exit_code != 0);
+    CHECK(contains(result.err, "sigma"));
+    CHECK(!fs::exists(output));
+    if (result.exit_code == 0 || !contains(result.err, "sigma") || fs::exists(output)) {
+        std::cerr << "  (while checking sigma '" << sigma << "')\n";
+    }
+}
+
+static void test_sigma_that_cannot_blur_is_rejected() {
+    check_sigma_is_rejected("0");
+    check_sigma_is_rejected("-1");
+    // std::stod accepts these spellings and returns a real NaN or infinity,
+    // so they get past "is it a number?" and must be caught by the blur.
+    check_sigma_is_rejected("nan");
+    check_sigma_is_rejected("inf");
+    check_sigma_is_rejected("-inf");
+}
+
+static void test_sigma_that_is_not_a_number_is_rejected() {
+    check_sigma_is_rejected("abc");
+    check_sigma_is_rejected("");
+    // Starts like a number but has junk after it: not silently read as 3.
+    check_sigma_is_rejected("3abc");
+}
+
+static void test_image_smaller_than_the_window_stays_flat() {
+    // At sigma 5 the window is 31 pixels wide, far wider than these images,
+    // so almost every neighbour is past the border and is read as the nearest
+    // edge pixel instead. A 1x1 image is always "flat"; the 2x2 one is made
+    // flat. Either way every neighbour has the same grey level, and Weights
+    // that sum to 1 must give that level straight back.
+    const fs::path dir = temp_dir("tiny_image");
+    const std::string input = (dir / "in.png").string();
+    const std::string output = (dir / "out.png").string();
+
+    for (const int side : {1, 2}) {
+        for (const int level : {0, 1, 127, 128, 200, 255}) {
+            const Image flat = make_flat(side, side, static_cast<std::uint8_t>(level));
+            save_image(input, flat);
+            fs::remove(output);   // so a stale file cannot pass the check
+
+            const RunResult result = run_cli({input, output, "5"});
+
+            CHECK(result.exit_code == 0);
+            CHECK(result.err.empty());
+            CHECK(fs::exists(output));
+            if (fs::exists(output)) {
+                CHECK(same_image(load_image(output), flat));
+            }
+        }
+    }
+}
+
+static void test_sigma_too_large_for_the_radius_is_rejected() {
+    // 1e300 is a perfectly good finite double, but its radius (3e300) is far
+    // beyond what an int can hold. The tool must say so instead of converting
+    // an out-of-range double to int, which is undefined behaviour.
+    check_sigma_is_rejected("1e300");
+}
+
+static void test_sigma_whose_weights_do_not_fit_in_memory_is_rejected() {
+    // Sigma 1e6 has a radius that fits in an int (3,000,000), but its window
+    // is 6,000,001 pixels on a side: about 3.6e13 Weights, or 144 TB of
+    // floats. No machine has that, so the allocation fails, and the tool
+    // must report it rather than crash or hang.
+    check_sigma_is_rejected("1e6");
+    // Sigma 3e8 still has a radius that fits in an int, but its window has
+    // more Weights than a std::vector can hold at all, which fails in a
+    // different way (std::length_error, not std::bad_alloc). The user should
+    // see the same kind of message.
+    check_sigma_is_rejected("3e8");
+}
+
 int main() {
     // A test that throws is a failure too, not a crash with no explanation.
     try {
@@ -430,6 +518,11 @@ int main() {
         test_sigma_1_blob_has_the_expected_values();
         test_larger_sigma_blurs_more();
         test_source_file_is_untouched();
+        test_sigma_that_cannot_blur_is_rejected();
+        test_sigma_that_is_not_a_number_is_rejected();
+        test_image_smaller_than_the_window_stays_flat();
+        test_sigma_too_large_for_the_radius_is_rejected();
+        test_sigma_whose_weights_do_not_fit_in_memory_is_rejected();
     } catch (const std::exception& e) {
         std::cerr << "unexpected exception: " << e.what() << "\n";
         ++failures;

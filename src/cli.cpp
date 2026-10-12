@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <exception>
+#include <new>
 #include <ostream>
 #include <stdexcept>
 
@@ -32,6 +33,11 @@ double parse_sigma(const std::string& text) {
     }
     throw std::invalid_argument("sigma must be a number, got '" + text + "'");
 }
+
+// Printed when the blur needs more memory than can be had.
+const char* const out_of_memory_message =
+    "Error: out of memory (a very large sigma or image needs more memory "
+    "than this machine has)\n";
 
 }  // namespace
 
@@ -69,6 +75,20 @@ int run(const std::vector<std::string>& args, std::ostream& out, std::ostream& e
             << ", radius " << radius_for_sigma(sigma)
             << ", " << elapsed.count() << " ms"
             << ", saved to " << output_path << "\n";
+    } catch (const std::bad_alloc&) {
+        // The Weights take (2 * radius + 1) squared values, so a very large
+        // sigma asks for more memory than the machine has. what() would only
+        // say "std::bad_alloc", which does not tell the user what to change.
+        // This handler has to come before the std::exception one: bad_alloc
+        // is a std::exception too, and the first handler that matches wins.
+        err << out_of_memory_message;
+        return 1;
+    } catch (const std::length_error&) {
+        // An even larger sigma asks for more elements than a std::vector can
+        // ever hold. The vector then throws length_error without trying to
+        // allocate at all. To the user it is the same problem.
+        err << out_of_memory_message;
+        return 1;
     } catch (const std::exception& e) {
         err << "Error: " << e.what() << "\n";
         return 1;

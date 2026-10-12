@@ -19,5 +19,6 @@ enum class Backend {
 // Pixels past the border are read as the nearest edge pixel (clamp-to-edge).
 // Works on any image of at least 1x1, even one smaller than the blur window.
 //
-// Throws std::invalid_argument if sigma is zero, negative, NaN or infinite.
+// Throws std::invalid_argument if sigma is zero, negative, NaN or infinite,
+// or so large that the radius would not fit in an int.
 Image gaussian_blur(const Image& source, double sigma, Backend backend, int threads);
