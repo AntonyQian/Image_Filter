@@ -19,7 +19,7 @@
 #include <omp.h>
 
 // Declarations only (no STB_IMAGE_WRITE_IMPLEMENTATION here): the code itself
-// is compiled once, in src/io.cpp. Needed for the one JPG test input.
+// is compiled once, in src/io.cpp. Needed for the colour (RGB) test inputs.
 #include <stb_image_write.h>
 
 #include "cli.h"
@@ -178,6 +178,50 @@ static void test_colour_jpg_becomes_grayscale_png() {
         CHECK(saved.width == width);
         CHECK(saved.height == height);
         CHECK(saved.channels == 1);
+    }
+}
+
+static void test_colour_input_gets_the_expected_grey_level() {
+    // The JPG test above only checks the size, because JPG is lossy: the
+    // decoded colours are not exactly the ones written. PNG is lossless, so
+    // here the grey level can be checked exactly.
+    //
+    // Every pixel is the same colour, so the grayscale Source is flat, and a
+    // flat image stays flat under the blur. Every Destination pixel must
+    // therefore be exactly the grey level stb gives this colour.
+    const fs::path dir = temp_dir("colour_grey_level");
+    const std::string input = (dir / "in.png").string();
+    const std::string output = (dir / "out.png").string();
+    const int width = 16;
+    const int height = 8;
+    const int r = 200;
+    const int g = 100;
+    const int b = 50;
+    std::vector<std::uint8_t> rgb;
+    for (int i = 0; i < width * height; ++i) {
+        rgb.push_back(static_cast<std::uint8_t>(r));
+        rgb.push_back(static_cast<std::uint8_t>(g));
+        rgb.push_back(static_cast<std::uint8_t>(b));
+    }
+    // The last argument is the stride: bytes from one row to the next.
+    CHECK(stbi_write_png(input.c_str(), width, height, 3, rgb.data(), width * 3) != 0);
+
+    // stb's own formula (stbi__compute_y in third_party/stb_image.h):
+    //   grey = (r * 77 + g * 150 + b * 29) >> 8
+    // Whole-number weights that add up to 256, so ">> 8" (divide by 256,
+    // rounding down) gives a weighted average. Green counts most because the
+    // eye is most sensitive to it. For this colour:
+    //   (200 * 77 + 100 * 150 + 50 * 29) >> 8 = 31850 >> 8 = 124
+    const int grey = (r * 77 + g * 150 + b * 29) >> 8;
+    CHECK(grey == 124);
+
+    const RunResult result = run_cli({input, output, "1"});
+
+    CHECK(result.exit_code == 0);
+    CHECK(fs::exists(output));
+    if (fs::exists(output)) {
+        const Image expected = make_flat(width, height, static_cast<std::uint8_t>(grey));
+        CHECK(same_image(load_image(output), expected));
     }
 }
 
@@ -666,6 +710,36 @@ static void test_image_smaller_than_the_window_stays_flat() {
     }
 }
 
+static void test_tiny_sigma_leaves_the_image_unchanged() {
+    // 1e-200 is a valid sigma (finite and greater than zero), just absurdly
+    // small. Its radius is ceil(3e-200) = 1, a 3x3 window, but the Gaussian
+    // is so narrow that the centre gets all the weight and the 8 neighbours
+    // get none. So the Destination must equal the Source.
+    //
+    // The trap: sigma * sigma is 1e-400, too small for a double, so it
+    // becomes 0. Dividing by it would give 0 / 0 = NaN at the centre and NaN
+    // Weights, which means a garbage image with exit code 0.
+    const fs::path dir = temp_dir("tiny_sigma");
+    const std::string input = (dir / "in.png").string();
+    const std::string output = (dir / "out.png").string();
+    const Image source = make_gradient(16, 9);   // not flat: a real blur would show
+
+    for (const char* backend : {"serial", "openmp"}) {
+        save_image(input, source);
+        fs::remove(output);   // so a stale file cannot pass the check
+
+        const RunResult result = run_cli({input, output, "1e-200", "--backend", backend});
+
+        CHECK(result.exit_code == 0);
+        CHECK(result.err.empty());
+        CHECK(contains(result.out, "radius 1"));
+        CHECK(fs::exists(output));
+        if (fs::exists(output)) {
+            CHECK(same_image(load_image(output), source));
+        }
+    }
+}
+
 static void test_sigma_too_large_for_the_radius_is_rejected() {
     // 1e300 is a perfectly good finite double, but its radius (3e300) is far
     // beyond what an int can hold. The tool must say so instead of converting
@@ -691,6 +765,7 @@ int main() {
     try {
         test_destination_keeps_the_source_size();
         test_colour_jpg_becomes_grayscale_png();
+        test_colour_input_gets_the_expected_grey_level();
         test_missing_input_names_the_path();
         test_unreadable_input_names_the_path();
         test_unwritable_output_names_the_path();
@@ -717,6 +792,7 @@ int main() {
         test_sigma_that_cannot_blur_is_rejected();
         test_sigma_that_is_not_a_number_is_rejected();
         test_image_smaller_than_the_window_stays_flat();
+        test_tiny_sigma_leaves_the_image_unchanged();
         test_sigma_too_large_for_the_radius_is_rejected();
         test_sigma_whose_weights_do_not_fit_in_memory_is_rejected();
     } catch (const std::exception& e) {

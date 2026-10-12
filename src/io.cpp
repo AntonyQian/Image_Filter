@@ -8,6 +8,7 @@
 #include "io.h"
 
 #include <cstddef>
+#include <memory>
 #include <stdexcept>
 
 Image load_image(const std::string& path) {
@@ -17,7 +18,17 @@ Image load_image(const std::string& path) {
 
     // The last argument (1) asks stb to convert whatever the file holds to a
     // single grayscale channel, so the returned buffer is width * height bytes.
-    unsigned char* image_pointer = stbi_load(path.c_str(), &width, &height, &channels_in_file, 1);
+    //
+    // stb allocated the buffer, so stb must free it, with stbi_image_free.
+    // Instead of calling that by hand, the buffer is handed to a unique_ptr
+    // whose "deleter" is stbi_image_free. The unique_ptr's destructor runs
+    // whenever this function is left, whether by the return at the bottom or
+    // by an exception (for example std::bad_alloc from the copy below), so
+    // the buffer is freed on every path. Tying cleanup to an object's
+    // lifetime like this is called RAII.
+    const std::unique_ptr<unsigned char, void (*)(void*)> buffer(
+        stbi_load(path.c_str(), &width, &height, &channels_in_file, 1), stbi_image_free);
+    const unsigned char* image_pointer = buffer.get();
 
     if (image_pointer == nullptr) {
         throw std::runtime_error("Failed to load image: " + path); // thrown if stbi_load fails
@@ -32,9 +43,7 @@ Image load_image(const std::string& path) {
     image.channels = 1;
     image.data.assign(image_pointer, image_pointer + total_elements); // copies all pixel bytes
 
-    stbi_image_free(image_pointer); // stb allocated the buffer, so stb frees it
-
-    return image;
+    return image; // `buffer` goes out of scope here and frees the stb buffer
 }
 
 void save_image(const std::string& path, const Image& img) {

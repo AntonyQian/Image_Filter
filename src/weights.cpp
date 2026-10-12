@@ -41,10 +41,22 @@ Weights make_weights(double sigma) {
     // Step 1: the 1D Gaussian, exp(-d^2 / (2 sigma^2)), for d = -radius..radius.
     // The usual 1 / (sigma * sqrt(2 pi)) factor in front is left out: it is
     // the same for every entry, so it cancels when we divide by the sum below.
+    //
+    // The exponent is computed as -0.5 * t * t with t = d / sigma. That is
+    // the same number as -d^2 / (2 sigma^2), but the obvious way of writing
+    // it breaks at the extremes:
+    //   - d * d is an int multiplication, which overflows (undefined
+    //     behaviour) once the radius passes 46340. Converting d to double
+    //     first avoids that.
+    //   - sigma * sigma underflows to 0 for a tiny sigma such as 1e-200, and
+    //     then the centre weight is 0 / 0 = NaN. Dividing by sigma once never
+    //     gives 0 / 0: at d = 0, t is exactly 0 and exp(-0) is exactly 1; at
+    //     any other d, t is huge (or infinite), and exp of minus infinity is
+    //     exactly 0.
     std::vector<double> gaussian_1d(static_cast<std::size_t>(side));
     for (int d = -radius; d <= radius; ++d) {
-        gaussian_1d[static_cast<std::size_t>(d + radius)] =
-            std::exp(-(d * d) / (2.0 * sigma * sigma));
+        const double t = static_cast<double>(d) / sigma;
+        gaussian_1d[static_cast<std::size_t>(d + radius)] = std::exp(-0.5 * t * t);
     }
 
     // Step 2: the 2D Gaussian is the product of two 1D ones, because
