@@ -39,16 +39,32 @@ target_compile_options(imgfilter PRIVATE -Wall -Wextra)
 # ---- Tests ----
 enable_testing()
 
-add_executable(test_cli tests/test_cli.cpp)
-target_link_libraries(test_cli PRIVATE imgfilter_core)
-target_compile_options(test_cli PRIVATE -Wall -Wextra)
+# One executable per file in tests/: tests/test_io.cpp builds test_io, and so
+# on. Shared helpers live in tests/test_utilities.hpp.
+set(TEST_NAMES
+    test_arguments
+    test_backends
+    test_blur
+    test_io
+    test_report
+    # add new test files here
+)
 
-# ctest does not build anything by itself. This "test" rebuilds test_cli, and
-# the fixture makes it run before the real test, so one command does both:
+foreach(test_name IN LISTS TEST_NAMES)
+    add_executable(${test_name} tests/${test_name}.cpp)
+    target_link_libraries(${test_name} PRIVATE imgfilter_core)
+    target_compile_options(${test_name} PRIVATE -Wall -Wextra)
+endforeach()
+
+# ctest does not build anything by itself. This "test" rebuilds every test
+# executable, and the fixture makes it run before the real tests, so one
+# command does both:
 #   ctest --test-dir build --output-on-failure
-add_test(NAME build_test_cli
-    COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target test_cli)
-set_tests_properties(build_test_cli PROPERTIES FIXTURES_SETUP test_cli_built)
+add_test(NAME build_tests
+    COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target ${TEST_NAMES})
+set_tests_properties(build_tests PROPERTIES FIXTURES_SETUP tests_built)
 
-add_test(NAME cli COMMAND test_cli)
-set_tests_properties(cli PROPERTIES FIXTURES_REQUIRED test_cli_built)
+foreach(test_name IN LISTS TEST_NAMES)
+    add_test(NAME ${test_name} COMMAND ${test_name})
+    set_tests_properties(${test_name} PROPERTIES FIXTURES_REQUIRED tests_built)
+endforeach()
