@@ -37,10 +37,11 @@ double parse_sigma(const std::string& text) {
 const char* const usage =
     "Usage: imgfilter <input image> <output.png> <sigma> "
     "[--backend serial|openmp] [--threads N]\n"
-    "       imgfilter bench [--sizes N,N,...] [--sigmas S,S,...]\n"
+    "       imgfilter bench [--sizes N,N,...] [--sigmas S,S,...] [--runs N]\n"
     "\n"
-    "The first form blurs one image. bench blurs a synthetic square image of\n"
-    "each size with each sigma (defaults: --sizes 4096 --sigmas 3).";
+    "The first form blurs one image. bench times the blur of a synthetic square\n"
+    "image of each size with each sigma: one untimed warm-up, then --runs timed\n"
+    "runs (defaults: --sizes 4096 --sigmas 3 --runs 15).";
 
 struct Options {
     Backend backend = Backend::OpenMP;
@@ -176,13 +177,28 @@ std::vector<double> parse_sigmas(const std::string& text) {
     return sigmas;
 }
 
+int parse_runs(const std::string& text) {
+    try {
+        // consumed rejects "3abc" and "2.5"
+        std::size_t consumed = 0;
+        const int runs = std::stoi(text, &consumed);
+        if (consumed == text.size() && runs >= 1) {
+            return runs;
+        }
+    } catch (const std::exception&) {
+        // fall through to the error below
+    }
+    throw std::invalid_argument(
+        "--runs must be a whole number, 1 or more, got '" + text + "'");
+}
+
 // Flags come after "bench", in any order, each followed by its value.
 BenchmarkConfig parse_bench_flags(const std::vector<std::string>& args) {
     BenchmarkConfig config;
 
     for (std::size_t i = 1; i < args.size(); i += 2) {
         const std::string& flag = args[i];
-        if (flag != "--sizes" && flag != "--sigmas") {
+        if (flag != "--sizes" && flag != "--sigmas" && flag != "--runs") {
             throw std::invalid_argument("unknown bench argument '" + flag + "'\n" + usage);
         }
 
@@ -193,8 +209,10 @@ BenchmarkConfig parse_bench_flags(const std::vector<std::string>& args) {
 
         if (flag == "--sizes") {
             config.sizes = parse_sizes(value);
-        } else {
+        } else if (flag == "--sigmas") {
             config.sigmas = parse_sigmas(value);
+        } else {
+            config.runs = parse_runs(value);
         }
     }
     return config;
