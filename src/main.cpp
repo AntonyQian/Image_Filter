@@ -1,12 +1,10 @@
 #include <iostream>
-#include <omp.h>
+#include <string>
+#include <vector>
 
-#include "io.h"
+#include "cli.h"
 
 int main(int argc, char* argv[]) {
-
-
-    (void)argc;       // placeholders; remove once you use them
-    (void)argv;
-    return 0;
+    const std::vector<std::string> args(argv + 1, argv + argc);
+    return run(args, std::cout, std::cerr);
 }

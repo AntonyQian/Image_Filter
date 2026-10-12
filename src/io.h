@@ -3,10 +3,10 @@
 #include <string>
 #include "image.h"
 
-// Loads an image file (PNG, JPG, ...) and returns it as 8-bit grayscale.
-// Suggestion: throw std::runtime_error if the file cannot be read.
-// Whatever you choose, write it in this comment so callers know.
+// Loads an image file as 8-bit grayscale, whatever the file contains.
+// Throws std::runtime_error if the file can't be read.
 Image load_image(const std::string& path);
 
-// Saves a grayscale image as a PNG. Returns true on success.
-bool save_image(const std::string& path, const Image& img);
+// Saves an image as a PNG.
+// Throws std::runtime_error if the file can't be written.
+void save_image(const std::string& path, const Image& img);
