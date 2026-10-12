@@ -4,16 +4,12 @@
 #include <string>
 #include <vector>
 
-// The whole command-line tool as an ordinary function, so tests can call it
-// without starting a process. main() only forwards to this.
+// The whole command-line tool as a function, so tests can call it directly.
 //
-// args: the command-line arguments WITHOUT the program name:
+// args: the arguments without the program name:
 //         input output sigma [--backend serial|openmp] [--threads N]
-//       Defaults: the openmp Backend, on every thread the OpenMP runtime
-//       offers (omp_get_max_threads).
-// out:  normal output (main passes std::cout)
-// err:  error messages (main passes std::cerr)
+//       Default is the openmp Backend on omp_get_max_threads() threads.
+// out, err: where normal output and error messages go.
 //
-// Returns the process exit code: 0 on success, non-zero on any failure.
-// Never throws; every failure becomes a message on err plus a non-zero code.
+// Returns the exit code: 0 on success, non-zero on failure. Never throws.
 int run(const std::vector<std::string>& args, std::ostream& out, std::ostream& err);

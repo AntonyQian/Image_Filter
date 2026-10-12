@@ -1,5 +1,4 @@
-// The stb implementation must be switched on in exactly ONE .cpp file.
-// This is that file. Do not define these macros anywhere else.
+// The stb implementation macros must be defined in exactly one .cpp file.
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image.h>
@@ -16,16 +15,8 @@ Image load_image(const std::string& path) {
     int height {};
     int channels_in_file {}; // what the file had; we do not use it
 
-    // The last argument (1) asks stb to convert whatever the file holds to a
-    // single grayscale channel, so the returned buffer is width * height bytes.
-    //
-    // stb allocated the buffer, so stb must free it, with stbi_image_free.
-    // Instead of calling that by hand, the buffer is handed to a unique_ptr
-    // whose "deleter" is stbi_image_free. The unique_ptr's destructor runs
-    // whenever this function is left, whether by the return at the bottom or
-    // by an exception (for example std::bad_alloc from the copy below), so
-    // the buffer is freed on every path. Tying cleanup to an object's
-    // lifetime like this is called RAII.
+    // The 1 asks stb for a single grayscale channel. The unique_ptr frees
+    // the stb buffer on every exit path, including exceptions.
     const std::unique_ptr<unsigned char, void (*)(void*)> buffer(
         stbi_load(path.c_str(), &width, &height, &channels_in_file, 1), stbi_image_free);
     const unsigned char* image_pointer = buffer.get();
@@ -43,15 +34,13 @@ Image load_image(const std::string& path) {
     image.channels = 1;
     image.data.assign(image_pointer, image_pointer + total_elements); // copies all pixel bytes
 
-    return image; // `buffer` goes out of scope here and frees the stb buffer
+    return image;
 }
 
 void save_image(const std::string& path, const Image& img) {
-    // Stride is the number of bytes from the start of one row to the next.
-    // Our rows are packed with no gaps, so it is width * channels.
+    // Rows are packed with no gaps.
     const int stride_in_bytes = img.width * img.channels;
 
-    // stbi_write_png returns 0 on failure (for example the folder does not exist).
     const int ok = stbi_write_png(path.c_str(), img.width, img.height, img.channels,
                                   img.data.data(), stride_in_bytes);
 

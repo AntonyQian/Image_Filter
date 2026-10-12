@@ -16,22 +16,18 @@
 
 namespace {
 
-// Turns the sigma argument into a number.
-// Throws std::invalid_argument if the text is not a number. Whether the
-// number is a usable sigma (finite, greater than zero) is checked by
-// gaussian_blur itself, so that rule lives in one place.
+// Only checks that the text is a number; gaussian_blur checks the range.
 double parse_sigma(const std::string& text) {
     try {
-        // std::stod stops at the first character it cannot use and reports
-        // how many it consumed, so "3abc" would otherwise be accepted as 3.
+        // stod stops at the first bad character, so "3abc" would pass as 3
+        // without the consumed check.
         std::size_t consumed = 0;
         const double sigma = std::stod(text, &consumed);
         if (consumed == text.size()) {
             return sigma;
         }
     } catch (const std::exception&) {
-        // Not a number at all, or too large for a double: fall through to
-        // the one error message below.
+        // fall through to the error below
     }
     throw std::invalid_argument("sigma must be a number, got '" + text + "'");
 }
@@ -40,18 +36,11 @@ const char* const usage =
     "Usage: imgfilter <input image> <output.png> <sigma> "
     "[--backend serial|openmp] [--threads N]";
 
-// What the optional flags asked for.
 struct Options {
     Backend backend = Backend::OpenMP;
-    // The most threads the OpenMP runtime will use by default: normally one
-    // per logical core, or the OMP_NUM_THREADS environment variable if set.
     int threads = omp_get_max_threads();
 };
 
-// Turns the value of --backend into a Backend.
-// Throws std::invalid_argument for a name that is not a Backend. A mistyped
-// name must not quietly fall back to the default: the user would be timing a
-// different Backend from the one they asked for.
 Backend parse_backend(const std::string& text) {
     if (text == "serial") {
         return Backend::Serial;
@@ -63,7 +52,6 @@ Backend parse_backend(const std::string& text) {
                                 "', valid values are: serial, openmp");
 }
 
-// The name a Backend is selected by and reported as.
 const char* backend_name(Backend backend) {
     switch (backend) {
         case Backend::Serial: return "serial";
@@ -72,27 +60,22 @@ const char* backend_name(Backend backend) {
     return "unknown";  // not reachable; keeps -Wreturn-type quiet
 }
 
-// Turns the value of --threads into a thread count of 1 or more.
-// Throws std::invalid_argument for anything else (0, negative, not a number).
 int parse_threads(const std::string& text) {
     try {
-        // Same trick as parse_sigma: `consumed` rejects "4abc" and "2.5".
+        // consumed rejects "4abc" and "2.5"
         std::size_t consumed = 0;
         const int threads = std::stoi(text, &consumed);
         if (consumed == text.size() && threads >= 1) {
             return threads;
         }
     } catch (const std::exception&) {
-        // Not a number at all, or too large for an int: same message below.
+        // fall through to the error below
     }
     throw std::invalid_argument(
         "--threads must be a whole number, 1 or more, got '" + text + "'");
 }
 
-// Reads the optional flags, which come after the three positional arguments.
-// Each flag is followed by its value: --backend openmp --threads 4
-// Throws std::invalid_argument for an unknown flag, a flag with no value
-// after it, or a value that is not valid.
+// Flags come after the three positional arguments, each followed by its value.
 Options parse_options(const std::vector<std::string>& args) {
     Options options;
 
@@ -102,7 +85,6 @@ Options parse_options(const std::vector<std::string>& args) {
             throw std::invalid_argument("unknown argument '" + flag + "'\n" + usage);
         }
 
-        // Check before reading args[i + 1]: the flag may be the last word.
         if (i + 1 >= args.size()) {
             throw std::invalid_argument(flag + " needs a value\n" + usage);
         }
@@ -115,15 +97,13 @@ Options parse_options(const std::vector<std::string>& args) {
         }
     }
 
-    // The serial Backend runs on the calling thread alone whatever --threads
-    // says, so record (and later print) the count that is really used.
+    // Serial ignores --threads, so report the count actually used.
     if (options.backend == Backend::Serial) {
         options.threads = 1;
     }
     return options;
 }
 
-// Printed when the blur needs more memory than can be had.
 const char* const out_of_memory_message =
     "Error: out of memory (a very large sigma or image needs more memory "
     "than this machine has)\n";
@@ -131,8 +111,6 @@ const char* const out_of_memory_message =
 }  // namespace
 
 int run(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
-    // Check the argument count before touching args[0..2]:
-    // reading past the end of a vector is undefined behaviour.
     if (args.size() < 3) {
         err << usage << "\n";
         return 1;
@@ -141,18 +119,12 @@ int run(const std::vector<std::string>& args, std::ostream& out, std::ostream& e
     const std::string& input_path = args[0];
     const std::string& output_path = args[1];
 
-    // Everything below reports failure by throwing. Catching here, in one
-    // place, turns any failure into a message plus a non-zero exit code, so
-    // an exception never escapes to main and aborts the program.
     try {
         const double sigma = parse_sigma(args[2]);
         const Options options = parse_options(args);
         const Image source = load_image(input_path);
 
-        // The timer wraps only the blur call: loading and saving are disk
-        // work and would hide the number we care about. steady_clock is the
-        // clock for measuring intervals because it never jumps backwards or
-        // forwards (system_clock can, when Windows adjusts the time).
+        // Time only the blur, not the disk I/O.
         const auto start = std::chrono::steady_clock::now();
         const Image destination = gaussian_blur(source, sigma, options.backend, options.threads);
         const auto stop = std::chrono::steady_clock::now();
@@ -168,17 +140,12 @@ int run(const std::vector<std::string>& args, std::ostream& out, std::ostream& e
             << ", " << elapsed.count() << " ms"
             << ", saved to " << output_path << "\n";
     } catch (const std::bad_alloc&) {
-        // The Weights take (2 * radius + 1) squared values, so a very large
-        // sigma asks for more memory than the machine has. what() would only
-        // say "std::bad_alloc", which does not tell the user what to change.
-        // This handler has to come before the std::exception one: bad_alloc
-        // is a std::exception too, and the first handler that matches wins.
+        // A very large sigma makes the Weights too big to allocate. Must come
+        // before the std::exception handler, which would also match.
         err << out_of_memory_message;
         return 1;
     } catch (const std::length_error&) {
-        // An even larger sigma asks for more elements than a std::vector can
-        // ever hold. The vector then throws length_error without trying to
-        // allocate at all. To the user it is the same problem.
+        // Larger still and std::vector refuses before even trying to allocate.
         err << out_of_memory_message;
         return 1;
     } catch (const std::exception& e) {
