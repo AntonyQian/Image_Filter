@@ -10,9 +10,13 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <random>
 #include <sstream>
 #include <string>
 #include <vector>
+
+// Only for omp_get_max_threads(), the thread count the tool defaults to.
+#include <omp.h>
 
 // Declarations only (no STB_IMAGE_WRITE_IMPLEMENTATION here): the code itself
 // is compiled once, in src/io.cpp. Needed for the one JPG test input.
@@ -414,6 +418,181 @@ static void test_source_file_is_untouched() {
     }
 }
 
+// ---- OpenMP Backend and the --backend / --threads flags ----
+
+static void test_default_backend_and_threads_are_printed() {
+    const fs::path dir = temp_dir("defaults_printed");
+    const std::string input = (dir / "in.png").string();
+    const std::string output = (dir / "out.png").string();
+    save_image(input, make_gradient(5, 3));
+
+    const RunResult result = run_cli({input, output, "1"});
+
+    // With no flags the tool uses the OpenMP Backend on every thread the
+    // OpenMP runtime offers, and says so.
+    CHECK(result.exit_code == 0);
+    CHECK(contains(result.out, "backend openmp"));
+    CHECK(contains(result.out,
+                   "threads " + std::to_string(omp_get_max_threads()) + ","));
+}
+
+static void test_chosen_backend_and_threads_are_printed() {
+    const fs::path dir = temp_dir("flags_printed");
+    const std::string input = (dir / "in.png").string();
+    const std::string output = (dir / "out.png").string();
+    save_image(input, make_gradient(5, 3));
+
+    const RunResult openmp = run_cli({input, output, "1", "--backend", "openmp", "--threads", "3"});
+    CHECK(openmp.exit_code == 0);
+    CHECK(contains(openmp.out, "backend openmp"));
+    CHECK(contains(openmp.out, "threads 3,"));
+
+    // The flags may come in either order.
+    const RunResult swapped = run_cli({input, output, "1", "--threads", "2", "--backend", "openmp"});
+    CHECK(swapped.exit_code == 0);
+    CHECK(contains(swapped.out, "backend openmp"));
+    CHECK(contains(swapped.out, "threads 2,"));
+
+    // The serial Backend always runs on one thread, and reports that even
+    // when it is not what --threads asked for.
+    const RunResult serial = run_cli({input, output, "1", "--backend", "serial"});
+    CHECK(serial.exit_code == 0);
+    CHECK(contains(serial.out, "backend serial"));
+    CHECK(contains(serial.out, "threads 1,"));
+
+    const RunResult serial_8 = run_cli({input, output, "1", "--backend", "serial", "--threads", "8"});
+    CHECK(serial_8.exit_code == 0);
+    CHECK(contains(serial_8.out, "threads 1,"));
+}
+
+// Random grey levels, the same ones on every run: std::mt19937 is specified
+// exactly by the C++ standard, so a fixed seed gives the same numbers on any
+// compiler. Noise has no pattern for a bug to hide behind: a row computed
+// twice, skipped, or written to the wrong place changes the output.
+static Image make_noise(int width, int height) {
+    Image img;
+    img.width = width;
+    img.height = height;
+    img.channels = 1;
+    img.data.resize(static_cast<std::size_t>(width) * height);
+    std::mt19937 generator(20261011u);   // constant seed
+    for (std::uint8_t& value : img.data) {
+        // mt19937 produces 32-bit numbers; keep the top 8 bits.
+        value = static_cast<std::uint8_t>(generator() >> 24);
+    }
+    return img;
+}
+
+static void test_openmp_output_is_byte_identical_to_serial() {
+    // 53 rows is a prime number, so no thread count here divides it evenly
+    // (53 = 2*26+1 = 3*17+2 = 4*13+1 = 8*6+5): the static schedule has
+    // left-over rows to hand out, and blocks of different sizes.
+    const fs::path dir = temp_dir("serial_equals_openmp");
+    const std::string input = (dir / "noise.png").string();
+    const std::string reference = (dir / "serial.png").string();
+    const std::string parallel = (dir / "openmp.png").string();
+    save_image(input, make_noise(37, 53));
+
+    for (const char* sigma : {"1", "3", "5"}) {
+        CHECK(run_cli({input, reference, sigma, "--backend", "serial"}).exit_code == 0);
+        const std::string expected = read_file_bytes(reference);
+        CHECK(!expected.empty());
+        // The Reference really blurred: its file is not a copy of the Source.
+        CHECK(expected != read_file_bytes(input));
+
+        for (const char* threads : {"1", "2", "3", "4", "8"}) {
+            fs::remove(parallel);   // never compare against a stale file
+
+            const RunResult result =
+                run_cli({input, parallel, sigma, "--backend", "openmp", "--threads", threads});
+
+            CHECK(result.exit_code == 0);
+            // The whole output file, byte for byte: not "close", identical.
+            CHECK(read_file_bytes(parallel) == expected);
+        }
+    }
+}
+
+static void test_more_threads_than_rows_still_works() {
+    // 3 rows shared between 8 and then 64 threads: most threads get no row
+    // at all, and the result must still be the Reference's.
+    const fs::path dir = temp_dir("more_threads_than_rows");
+    const std::string input = (dir / "in.png").string();
+    const std::string reference = (dir / "serial.png").string();
+    const std::string parallel = (dir / "openmp.png").string();
+    save_image(input, make_noise(5, 3));
+
+    CHECK(run_cli({input, reference, "1", "--backend", "serial"}).exit_code == 0);
+    const std::string expected = read_file_bytes(reference);
+    CHECK(!expected.empty());
+
+    for (const char* threads : {"8", "64"}) {
+        fs::remove(parallel);
+
+        const RunResult result =
+            run_cli({input, parallel, "1", "--backend", "openmp", "--threads", threads});
+
+        CHECK(result.exit_code == 0);
+        CHECK(result.err.empty());
+        CHECK(contains(result.out, std::string("threads ") + threads + ","));
+        CHECK(read_file_bytes(parallel) == expected);
+    }
+}
+
+// Runs the tool with a valid input plus `flags`, which must be rejected with
+// an error that mentions every text in `expected_in_error`, and without
+// writing an output file.
+static void check_flags_rejected(const std::vector<std::string>& flags,
+                                 const std::vector<std::string>& expected_in_error) {
+    const fs::path dir = temp_dir("rejected_flags");
+    const std::string input = (dir / "in.png").string();
+    const std::string output = (dir / "out.png").string();
+    save_image(input, make_gradient(5, 3));
+
+    std::vector<std::string> args = {input, output, "1"};
+    args.insert(args.end(), flags.begin(), flags.end());
+    const RunResult result = run_cli(args);
+
+    CHECK(result.exit_code != 0);
+    CHECK(result.out.empty());
+    CHECK(!fs::exists(output));
+    for (const std::string& expected : expected_in_error) {
+        if (!contains(result.err, expected)) {
+            std::cerr << "error message lacks '" << expected << "': " << result.err;
+        }
+        CHECK(contains(result.err, expected));
+    }
+}
+
+static void test_unknown_backend_lists_the_valid_ones() {
+    check_flags_rejected({"--backend", "cuda"}, {"cuda", "serial", "openmp"});
+    // Names are matched exactly: no guessing, no silent fallback.
+    check_flags_rejected({"--backend", "OpenMP"}, {"serial", "openmp"});
+    check_flags_rejected({"--backend", ""}, {"serial", "openmp"});
+}
+
+static void test_bad_thread_count_says_what_is_valid() {
+    for (const char* bad : {"0", "-1", "-8", "four", "", "2.5", "4x", "99999999999999999999"}) {
+        check_flags_rejected({"--threads", bad}, {"--threads", "1 or more"});
+        // Also rejected for the serial Backend, which would ignore the count:
+        // a mistyped flag is never silently accepted.
+        check_flags_rejected({"--backend", "serial", "--threads", bad},
+                             {"--threads", "1 or more"});
+    }
+}
+
+static void test_flag_without_a_value_is_rejected() {
+    check_flags_rejected({"--backend"}, {"--backend", "serial", "openmp"});
+    check_flags_rejected({"--threads"}, {"--threads", "Usage"});
+    check_flags_rejected({"--backend", "serial", "--threads"}, {"--threads", "Usage"});
+}
+
+static void test_unknown_flag_lists_the_valid_ones() {
+    check_flags_rejected({"--thread", "4"}, {"--thread", "--backend", "--threads"});
+    check_flags_rejected({"--fast"}, {"--fast", "--backend", "--threads"});
+    check_flags_rejected({"-t", "4"}, {"-t", "--backend", "--threads"});
+}
+
 // ---- Bad sigma and tiny images (ticket #10) ----
 
 // Runs the tool with a sigma it must refuse and checks the three things a
@@ -464,19 +643,24 @@ static void test_image_smaller_than_the_window_stays_flat() {
     const std::string input = (dir / "in.png").string();
     const std::string output = (dir / "out.png").string();
 
-    for (const int side : {1, 2}) {
-        for (const int level : {0, 1, 127, 128, 200, 255}) {
-            const Image flat = make_flat(side, side, static_cast<std::uint8_t>(level));
-            save_image(input, flat);
-            fs::remove(output);   // so a stale file cannot pass the check
+    // Both Backends: with 4 threads and only 1 or 2 rows, the OpenMP Backend
+    // also has threads that are given no row at all.
+    for (const char* backend : {"serial", "openmp"}) {
+        for (const int side : {1, 2}) {
+            for (const int level : {0, 1, 127, 128, 200, 255}) {
+                const Image flat = make_flat(side, side, static_cast<std::uint8_t>(level));
+                save_image(input, flat);
+                fs::remove(output);   // so a stale file cannot pass the check
 
-            const RunResult result = run_cli({input, output, "5"});
+                const RunResult result =
+                    run_cli({input, output, "5", "--backend", backend, "--threads", "4"});
 
-            CHECK(result.exit_code == 0);
-            CHECK(result.err.empty());
-            CHECK(fs::exists(output));
-            if (fs::exists(output)) {
-                CHECK(same_image(load_image(output), flat));
+                CHECK(result.exit_code == 0);
+                CHECK(result.err.empty());
+                CHECK(fs::exists(output));
+                if (fs::exists(output)) {
+                    CHECK(same_image(load_image(output), flat));
+                }
             }
         }
     }
@@ -518,6 +702,18 @@ int main() {
         test_sigma_1_blob_has_the_expected_values();
         test_larger_sigma_blurs_more();
         test_source_file_is_untouched();
+
+        // OpenMP Backend and the --backend / --threads flags
+        test_default_backend_and_threads_are_printed();
+        test_chosen_backend_and_threads_are_printed();
+        test_openmp_output_is_byte_identical_to_serial();
+        test_more_threads_than_rows_still_works();
+        test_unknown_backend_lists_the_valid_ones();
+        test_bad_thread_count_says_what_is_valid();
+        test_flag_without_a_value_is_rejected();
+        test_unknown_flag_lists_the_valid_ones();
+
+        // Bad sigma and tiny images
         test_sigma_that_cannot_blur_is_rejected();
         test_sigma_that_is_not_a_number_is_rejected();
         test_image_smaller_than_the_window_stays_flat();

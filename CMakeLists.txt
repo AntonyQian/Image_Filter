@@ -9,6 +9,12 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# Do NOT add -ffast-math, -Ofast (which turns fast-math on) or -march=native.
+# Every Backend must produce the same Destination bit for bit. Fast-math lets
+# the compiler reorder float additions, and -march=native lets it fuse a
+# multiply and an add into one FMA instruction that rounds differently and
+# depends on the CPU the build ran on. Either could make two builds, or two
+# loops in the same build, disagree in the last bit.
 find_package(OpenMP REQUIRED)
 
 # Everything except main() lives in this static library, so the command-line

@@ -62,14 +62,53 @@ void blur_serial(const Image& source, const Weights& weights, Image& destination
     }
 }
 
+// The OpenMP Backend: the serial loop again, with one added line that shares
+// the rows out between `threads` threads. Nothing else may differ from
+// blur_serial, because the two must produce the same Destination bit for bit.
+//
+// Why there is no data race: every thread only reads `source` and `weights`,
+// and the thread that owns row y is the only one that writes row y of
+// `destination`. No byte is written by two threads, and no thread reads a
+// byte another thread writes, so no lock is needed.
+//
+// Why the result is bit-identical to serial: each pixel is computed entirely
+// inside one blur_row call, by one thread, with the same additions in the
+// same order. Threads decide only WHICH rows a thread computes and WHEN,
+// never HOW a pixel is computed, and nothing is summed across threads.
+void blur_openmp(const Image& source, const Weights& weights, int threads,
+                 Image& destination) {
+    // schedule(static): the rows are cut into `threads` equal consecutive
+    // blocks, decided once before the loop starts. Every row costs the same
+    // amount of work, so equal blocks are already balanced, there is no
+    // run-time bookkeeping, and each thread walks one contiguous stretch of
+    // memory (good for the cache).
+    //
+    // The loop variable is a signed int: the original OpenMP rules required
+    // it, it matches Image's int width and height, and the compiler can
+    // assume a signed counter never wraps around. It is declared inside the
+    // `for`, which makes it private: each thread has its own y.
+    //
+    // More threads than rows is fine: the extra threads get no rows.
+    #pragma omp parallel for schedule(static) num_threads(threads)
+    for (int y = 0; y < source.height; ++y) {
+        blur_row(source, weights, y, destination);
+    }
+}
+
 }  // namespace
 
-Image gaussian_blur(const Image& source, double sigma, Backend backend, int /*threads*/) {
+Image gaussian_blur(const Image& source, double sigma, Backend backend, int threads) {
     // Written as "not (finite and positive)" so that NaN is rejected too:
     // every comparison with NaN is false, so a plain `sigma <= 0` would let
     // it through.
     if (!(std::isfinite(sigma) && sigma > 0.0)) {
         throw std::invalid_argument("sigma must be a finite number greater than 0");
+    }
+
+    // A team of zero or fewer threads means nothing, and OpenMP does not
+    // define what num_threads does with such a value.
+    if (backend == Backend::OpenMP && threads < 1) {
+        throw std::invalid_argument("threads must be 1 or more");
     }
 
     // Built once per blur and then only read.
@@ -87,6 +126,9 @@ Image gaussian_blur(const Image& source, double sigma, Backend backend, int /*th
     switch (backend) {
         case Backend::Serial:
             blur_serial(source, weights, destination);
+            break;
+        case Backend::OpenMP:
+            blur_openmp(source, weights, threads, destination);
             break;
     }
 
