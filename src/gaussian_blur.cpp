@@ -88,3 +88,11 @@ Image gaussian_blur(const Image& source, double sigma, Backend backend, int thre
 
     return destination;
 }
+
+const char* backend_name(Backend backend) {
+    switch (backend) {
+        case Backend::Serial: return "serial";
+        case Backend::OpenMP: return "openmp";
+    }
+    return "unknown";  // not reachable; keeps -Wreturn-type quiet
+}

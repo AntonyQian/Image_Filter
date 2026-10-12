@@ -20,6 +20,7 @@ find_package(OpenMP REQUIRED)
 # Everything except main() lives in this static library, so the command-line
 # tool and the test executable link the exact same code.
 add_library(imgfilter_core STATIC
+    src/benchmark.cpp
     src/cli.cpp
     src/gaussian_blur.cpp
     src/io.cpp
@@ -44,6 +45,7 @@ enable_testing()
 set(TEST_NAMES
     test_arguments
     test_backends
+    test_bench
     test_blur
     test_io
     test_report
