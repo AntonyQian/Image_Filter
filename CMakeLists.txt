@@ -20,6 +20,7 @@ find_package(OpenMP REQUIRED)
 # Everything except main() lives in this static library, so the command-line
 # tool and the test executable link the exact same code.
 add_library(imgfilter_core STATIC
+    src/benchmark.cpp
     src/cli.cpp
     src/gaussian_blur.cpp
     src/io.cpp
@@ -52,3 +53,15 @@ set_tests_properties(build_test_cli PROPERTIES FIXTURES_SETUP test_cli_built)
 
 add_test(NAME cli COMMAND test_cli)
 set_tests_properties(cli PROPERTIES FIXTURES_REQUIRED test_cli_built)
+
+# Benchmark (bench subcommand) tests, built and run the same way.
+add_executable(test_bench tests/test_bench.cpp)
+target_link_libraries(test_bench PRIVATE imgfilter_core)
+target_compile_options(test_bench PRIVATE -Wall -Wextra)
+
+add_test(NAME build_test_bench
+    COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target test_bench)
+set_tests_properties(build_test_bench PROPERTIES FIXTURES_SETUP test_bench_built)
+
+add_test(NAME bench COMMAND test_bench)
+set_tests_properties(bench PROPERTIES FIXTURES_REQUIRED test_bench_built)

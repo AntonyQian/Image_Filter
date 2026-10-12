@@ -1,6 +1,7 @@
 #include "cli.h"
 
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <exception>
 #include <new>
@@ -9,6 +10,7 @@
 
 #include <omp.h>
 
+#include "benchmark.h"
 #include "gaussian_blur.h"
 #include "image.h"
 #include "io.h"
@@ -34,7 +36,11 @@ double parse_sigma(const std::string& text) {
 
 const char* const usage =
     "Usage: imgfilter <input image> <output.png> <sigma> "
-    "[--backend serial|openmp] [--threads N]";
+    "[--backend serial|openmp] [--threads N]\n"
+    "       imgfilter bench [--sizes N,N,...] [--sigmas S,S,...]\n"
+    "\n"
+    "The first form blurs one image. bench blurs a synthetic square image of\n"
+    "each size with each sigma (defaults: --sizes 4096 --sigmas 3).";
 
 struct Options {
     Backend backend = Backend::OpenMP;
@@ -50,14 +56,6 @@ Backend parse_backend(const std::string& text) {
     }
     throw std::invalid_argument("unknown backend '" + text +
                                 "', valid values are: serial, openmp");
-}
-
-const char* backend_name(Backend backend) {
-    switch (backend) {
-        case Backend::Serial: return "serial";
-        case Backend::OpenMP: return "openmp";
-    }
-    return "unknown";  // not reachable; keeps -Wreturn-type quiet
 }
 
 int parse_threads(const std::string& text) {
@@ -104,13 +102,114 @@ Options parse_options(const std::vector<std::string>& args) {
     return options;
 }
 
-const char* const out_of_memory_message =
-    "Error: out of memory (a very large sigma or image needs more memory "
-    "than this machine has)\n";
+// ---- bench subcommand ----
 
-}  // namespace
+// Splits "16,37" into {"16", "37"}. Keeps empty items ("16,,37" has one), so
+// the caller rejects them as not a number. An empty text gives no items.
+std::vector<std::string> split_list(const std::string& text) {
+    std::vector<std::string> items;
+    if (text.empty()) {
+        return items;
+    }
+    std::size_t start = 0;
+    while (true) {
+        const std::size_t comma = text.find(',', start);
+        if (comma == std::string::npos) {
+            items.push_back(text.substr(start));
+            return items;
+        }
+        items.push_back(text.substr(start, comma - start));
+        start = comma + 1;
+    }
+}
 
-int run(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
+std::vector<int> parse_sizes(const std::string& text) {
+    std::vector<int> sizes;
+    try {
+        for (const std::string& item : split_list(text)) {
+            // consumed rejects "16abc" and "2.5"
+            std::size_t consumed = 0;
+            const int size = std::stoi(item, &consumed);
+            if (consumed != item.size() || size < 1) {
+                sizes.clear();
+                break;
+            }
+            sizes.push_back(size);
+        }
+    } catch (const std::exception&) {
+        sizes.clear();   // not a number, or too big for an int
+    }
+    if (sizes.empty()) {
+        throw std::invalid_argument(
+            "--sizes must be a comma-separated list of whole numbers, each 1 or more "
+            "(for example 1024,2048), got '" + text + "'");
+    }
+    return sizes;
+}
+
+std::vector<double> parse_sigmas(const std::string& text) {
+    std::vector<double> sigmas;
+    try {
+        for (const std::string& item : split_list(text)) {
+            std::size_t consumed = 0;
+            const double sigma = std::stod(item, &consumed);
+            // The same rule gaussian_blur uses: finite and positive. stod
+            // accepts "nan" and "inf", so they are caught here.
+            if (consumed != item.size() || !std::isfinite(sigma) || sigma <= 0.0) {
+                sigmas.clear();
+                break;
+            }
+            sigmas.push_back(sigma);
+        }
+    } catch (const std::exception&) {
+        sigmas.clear();   // not a number, or out of range for a double
+    }
+    if (sigmas.empty()) {
+        throw std::invalid_argument(
+            "--sigmas must be a comma-separated list of numbers greater than 0 "
+            "(for example 1,3,5), got '" + text + "'");
+    }
+    // Throws now, before anything is measured, if a sigma is too large.
+    for (const double sigma : sigmas) {
+        radius_for_sigma(sigma);
+    }
+    return sigmas;
+}
+
+// Flags come after "bench", in any order, each followed by its value.
+BenchmarkConfig parse_bench_flags(const std::vector<std::string>& args) {
+    BenchmarkConfig config;
+
+    for (std::size_t i = 1; i < args.size(); i += 2) {
+        const std::string& flag = args[i];
+        if (flag != "--sizes" && flag != "--sigmas") {
+            throw std::invalid_argument("unknown bench argument '" + flag + "'\n" + usage);
+        }
+
+        if (i + 1 >= args.size()) {
+            throw std::invalid_argument(flag + " needs a value\n" + usage);
+        }
+        const std::string& value = args[i + 1];
+
+        if (flag == "--sizes") {
+            config.sizes = parse_sizes(value);
+        } else {
+            config.sigmas = parse_sigmas(value);
+        }
+    }
+    return config;
+}
+
+// args[0] is "bench". Every flag is checked before anything is measured.
+int bench_command(const std::vector<std::string>& args, std::ostream& out) {
+    const BenchmarkConfig config = parse_bench_flags(args);
+    run_benchmark(config, out);
+    return 0;
+}
+
+// ---- blur command ----
+
+int blur_command(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
     if (args.size() < 3) {
         err << usage << "\n";
         return 1;
@@ -119,26 +218,41 @@ int run(const std::vector<std::string>& args, std::ostream& out, std::ostream& e
     const std::string& input_path = args[0];
     const std::string& output_path = args[1];
 
+    const double sigma = parse_sigma(args[2]);
+    const Options options = parse_options(args);
+    const Image source = load_image(input_path);
+
+    // Time only the blur, not the disk I/O.
+    const auto start = std::chrono::steady_clock::now();
+    const Image destination = gaussian_blur(source, sigma, options.backend, options.threads);
+    const auto stop = std::chrono::steady_clock::now();
+    const std::chrono::duration<double, std::milli> elapsed = stop - start;
+
+    save_image(output_path, destination);
+
+    out << "Blurred " << source.width << "x" << source.height
+        << " image, sigma " << sigma
+        << ", radius " << radius_for_sigma(sigma)
+        << ", backend " << backend_name(options.backend)
+        << ", threads " << options.threads
+        << ", " << elapsed.count() << " ms"
+        << ", saved to " << output_path << "\n";
+    return 0;
+}
+
+const char* const out_of_memory_message =
+    "Error: out of memory (a very large sigma or image needs more memory "
+    "than this machine has)\n";
+
+}  // namespace
+
+int run(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
     try {
-        const double sigma = parse_sigma(args[2]);
-        const Options options = parse_options(args);
-        const Image source = load_image(input_path);
-
-        // Time only the blur, not the disk I/O.
-        const auto start = std::chrono::steady_clock::now();
-        const Image destination = gaussian_blur(source, sigma, options.backend, options.threads);
-        const auto stop = std::chrono::steady_clock::now();
-        const std::chrono::duration<double, std::milli> elapsed = stop - start;
-
-        save_image(output_path, destination);
-
-        out << "Blurred " << source.width << "x" << source.height
-            << " image, sigma " << sigma
-            << ", radius " << radius_for_sigma(sigma)
-            << ", backend " << backend_name(options.backend)
-            << ", threads " << options.threads
-            << ", " << elapsed.count() << " ms"
-            << ", saved to " << output_path << "\n";
+        // A Source file literally named "bench" needs a path prefix: ./bench
+        if (!args.empty() && args[0] == "bench") {
+            return bench_command(args, out);
+        }
+        return blur_command(args, out, err);
     } catch (const std::bad_alloc&) {
         // A very large sigma makes the Weights too big to allocate. Must come
         // before the std::exception handler, which would also match.
@@ -152,6 +266,4 @@ int run(const std::vector<std::string>& args, std::ostream& out, std::ostream& e
         err << "Error: " << e.what() << "\n";
         return 1;
     }
-
-    return 0;
 }
