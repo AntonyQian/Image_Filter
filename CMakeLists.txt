@@ -15,7 +15,9 @@ find_package(OpenMP REQUIRED)
 # tool and the test executable link the exact same code.
 add_library(imgfilter_core STATIC
     src/cli.cpp
+    src/gaussian_blur.cpp
     src/io.cpp
+    src/weights.cpp
     # add new .cpp files here
 )
 target_include_directories(imgfilter_core PUBLIC src)

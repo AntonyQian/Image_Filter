@@ -7,7 +7,7 @@
 // The whole command-line tool as an ordinary function, so tests can call it
 // without starting a process. main() only forwards to this.
 //
-// args: the command-line arguments WITHOUT the program name:  input output
+// args: the command-line arguments WITHOUT the program name:  input output sigma
 // out:  normal output (main passes std::cout)
 // err:  error messages (main passes std::cerr)
 //
