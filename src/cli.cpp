@@ -278,12 +278,50 @@ void write_csv(std::ostream& csv, const std::vector<BenchmarkRow>& rows) {
     }
 }
 
+// The compiler's name and version, from macros the compiler defines itself.
+// Clang also defines __GNUC__, so it is checked first.
+#if defined(__clang__)
+const char* const compiler_version = "Clang " __clang_version__;
+#elif defined(__GNUC__)
+const char* const compiler_version = "GCC " __VERSION__;
+#else
+const char* const compiler_version = "unknown";
+#endif
+
+// IMGFILTER_BUILD_TYPE and IMGFILTER_COMPILE_FLAGS come from CMakeLists.txt,
+// so they are what this build was configured with.
+// No line starts with a number, so none can be mistaken for a table row.
+void print_environment(std::ostream& out, int runs) {
+    const std::string build_type = IMGFILTER_BUILD_TYPE;
+    out << "compiler:    " << compiler_version << "\n"
+        << "build type:  " << (build_type.empty() ? "(none)" : build_type) << "\n"
+        << "flags:       " << IMGFILTER_COMPILE_FLAGS << "\n"
+        << "max threads: " << omp_get_max_threads() << "\n"
+        << "runs:        " << runs << "\n"
+        << "\n";
+}
+
+// GCC and Clang define __OPTIMIZE__ at -O1 and above, so this follows the
+// flags the code was really compiled with, not the name of the build type.
+// The benchmark still runs: the timings are just not worth quoting.
+void warn_if_unoptimised(std::ostream& err) {
+#ifndef __OPTIMIZE__
+    const std::string build_type = IMGFILTER_BUILD_TYPE;
+    err << "Warning: this build is not optimised (build type: "
+        << (build_type.empty() ? "(none)" : build_type)
+        << "), so these timings say nothing about real speed. "
+           "Rebuild with -DCMAKE_BUILD_TYPE=Release before quoting any numbers.\n";
+#else
+    (void)err;
+#endif
+}
+
 // args[0] is "bench". Every flag is checked before anything is measured.
-int bench_command(const std::vector<std::string>& args, std::ostream& out) {
+int bench_command(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
     const BenchOptions options = parse_bench_flags(args);
 
-    // Opened before anything is measured, so a bad path fails now and not
-    // after a long session.
+    // Opened before anything is printed or measured, so a bad path fails now
+    // and not after a long session.
     std::ofstream csv;
     if (!options.csv_path.empty()) {
         csv.open(options.csv_path);
@@ -292,6 +330,8 @@ int bench_command(const std::vector<std::string>& args, std::ostream& out) {
         }
     }
 
+    warn_if_unoptimised(err);
+    print_environment(out, options.config.runs);
     const std::vector<BenchmarkRow> rows = run_benchmark(options.config, out);
 
     if (csv.is_open()) {
@@ -343,7 +383,7 @@ int run(const std::vector<std::string>& args, std::ostream& out, std::ostream& e
     try {
         // A Source file literally named "bench" needs a path prefix: ./bench
         if (!args.empty() && args[0] == "bench") {
-            return bench_command(args, out);
+            return bench_command(args, out, err);
         }
         return blur_command(args, out, err);
     } catch (const std::bad_alloc&) {
