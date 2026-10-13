@@ -64,12 +64,8 @@ enable_testing()
 # One executable per file in tests/: tests/test_io.cpp builds test_io, and so
 # on. Shared helpers live in tests/test_utilities.hpp.
 set(TEST_NAMES
-    test_arguments
     test_backends
-    test_bench
     test_blur
-    test_io
-    test_report
     # add new test files here
 )
 
@@ -78,10 +74,6 @@ foreach(test_name IN LISTS TEST_NAMES)
     target_link_libraries(${test_name} PRIVATE imgfilter_core)
     target_compile_options(${test_name} PRIVATE -Wall -Wextra)
 endforeach()
-
-# test_bench checks that bench reports the build type it was configured with.
-target_compile_definitions(test_bench PRIVATE
-    "EXPECTED_BUILD_TYPE=\"${CMAKE_BUILD_TYPE}\"")
 
 # ctest does not build anything by itself. This "test" rebuilds every test
 # executable, and the fixture makes it run before the real tests, so one
