@@ -37,11 +37,14 @@ double parse_sigma(const std::string& text) {
 const char* const usage =
     "Usage: imgfilter <input image> <output.png> <sigma> "
     "[--backend serial|openmp] [--threads N]\n"
-    "       imgfilter bench [--sizes N,N,...] [--sigmas S,S,...] [--runs N]\n"
+    "       imgfilter bench [--sizes N,N,...] [--sigmas S,S,...] [--threads N,N,...]\n"
+    "                       [--runs N]\n"
     "\n"
     "The first form blurs one image. bench times the blur of a synthetic square\n"
-    "image of each size with each sigma: one untimed warm-up, then --runs timed\n"
-    "runs (defaults: --sizes 4096 --sigmas 3 --runs 15).";
+    "image of each size with each sigma: the serial backend first, then the\n"
+    "openmp backend at each thread count. Each is one untimed warm-up, then\n"
+    "--runs timed runs (defaults: --sizes 4096 --sigmas 3 --runs 15, and\n"
+    "--threads every count from 1 to the maximum).";
 
 struct Options {
     Backend backend = Backend::OpenMP;
@@ -177,6 +180,30 @@ std::vector<double> parse_sigmas(const std::string& text) {
     return sigmas;
 }
 
+std::vector<int> parse_thread_counts(const std::string& text) {
+    std::vector<int> thread_counts;
+    try {
+        for (const std::string& item : split_list(text)) {
+            // consumed rejects "4abc" and "2.5"
+            std::size_t consumed = 0;
+            const int threads = std::stoi(item, &consumed);
+            if (consumed != item.size() || threads < 1) {
+                thread_counts.clear();
+                break;
+            }
+            thread_counts.push_back(threads);
+        }
+    } catch (const std::exception&) {
+        thread_counts.clear();   // not a number, or too big for an int
+    }
+    if (thread_counts.empty()) {
+        throw std::invalid_argument(
+            "--threads must be a comma-separated list of whole numbers, each 1 or more "
+            "(for example 1,2,4,8), got '" + text + "'");
+    }
+    return thread_counts;
+}
+
 int parse_runs(const std::string& text) {
     try {
         // consumed rejects "3abc" and "2.5"
@@ -198,7 +225,7 @@ BenchmarkConfig parse_bench_flags(const std::vector<std::string>& args) {
 
     for (std::size_t i = 1; i < args.size(); i += 2) {
         const std::string& flag = args[i];
-        if (flag != "--sizes" && flag != "--sigmas" && flag != "--runs") {
+        if (flag != "--sizes" && flag != "--sigmas" && flag != "--threads" && flag != "--runs") {
             throw std::invalid_argument("unknown bench argument '" + flag + "'\n" + usage);
         }
 
@@ -211,6 +238,8 @@ BenchmarkConfig parse_bench_flags(const std::vector<std::string>& args) {
             config.sizes = parse_sizes(value);
         } else if (flag == "--sigmas") {
             config.sigmas = parse_sigmas(value);
+        } else if (flag == "--threads") {
+            config.threads = parse_thread_counts(value);
         } else {
             config.runs = parse_runs(value);
         }
