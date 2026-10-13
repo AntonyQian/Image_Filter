@@ -7,6 +7,8 @@
 #include <iomanip>
 #include <ostream>
 #include <random>
+#include <sstream>
+#include <stdexcept>
 
 #include <omp.h>
 
@@ -120,6 +122,29 @@ void set_scaling(BenchmarkRow& row, double reference_median_ms) {
     row.efficiency = row.speedup / row.threads;
 }
 
+// Checks that a configuration's Warm-up Destination is byte for byte the
+// Reference Destination of the same size and sigma. Throws std::runtime_error
+// naming the configuration if it is not, so no timing is reported for a
+// Backend that gives the wrong answer. Called outside every timed region.
+void verify_against_reference(const Measurement& measurement, const Image& reference_destination) {
+    const Image& destination = measurement.warm_up;
+    if (destination.width == reference_destination.width &&
+        destination.height == reference_destination.height &&
+        destination.channels == reference_destination.channels &&
+        destination.data == reference_destination.data) {
+        return;
+    }
+
+    const BenchmarkRow& row = measurement.row;
+    std::ostringstream message;
+    message << "verification failed: size " << reference_destination.width
+            << ", sigma " << row.sigma
+            << ", backend " << backend_name(row.backend)
+            << ", threads " << row.threads
+            << ": the Destination differs from the Reference";
+    throw std::runtime_error(message.str());
+}
+
 }  // namespace
 
 std::vector<int> default_thread_counts() {
@@ -156,7 +181,8 @@ std::vector<BenchmarkRow> run_benchmark(const BenchmarkConfig& config, std::ostr
         const Image source = make_synthetic_image(size);
 
         for (const double sigma : config.sigmas) {
-            // The Reference: the serial Backend on one thread.
+            // The Reference: the serial Backend on one thread. Its Warm-up
+            // Destination is kept to verify the rest of this size and sigma.
             Measurement reference = measure(source, sigma, Backend::Serial, 1, config.runs);
             const double reference_median_ms = reference.row.median_ms;
             set_scaling(reference.row, reference_median_ms);
@@ -167,6 +193,9 @@ std::vector<BenchmarkRow> run_benchmark(const BenchmarkConfig& config, std::ostr
             for (const Backend backend : swept_backends) {
                 for (const int threads : config.threads) {
                     Measurement measurement = measure(source, sigma, backend, threads, config.runs);
+                    // Before the row is printed: a wrong Destination gets no
+                    // timings.
+                    verify_against_reference(measurement, reference.warm_up);
                     set_scaling(measurement.row, reference_median_ms);
                     rows.push_back(measurement.row);
                     print_row(progress, rows.back());

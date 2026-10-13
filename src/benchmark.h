@@ -51,9 +51,13 @@ Image make_synthetic_image(int size);
 // and allocating the Destination, and nothing else.
 // Speedup is the Reference median of the same size and sigma divided by the
 // row's median; efficiency is speedup divided by the thread count.
+// Before a row is printed, the Destination of its Warm-up is compared byte
+// for byte with the Reference Destination of the same size and sigma.
 // Writes the column header to `progress`, then each row as soon as it is done.
 // Returns the same rows.
 //
-// Throws what gaussian_blur throws, and std::bad_alloc if an Image does not
-// fit in memory.
+// Throws std::runtime_error naming the size, sigma, Backend and thread count
+// if a Destination differs from the Reference; the rows before it have
+// already been written. Also throws what gaussian_blur throws, and
+// std::bad_alloc if an Image does not fit in memory.
 std::vector<BenchmarkRow> run_benchmark(const BenchmarkConfig& config, std::ostream& progress);
