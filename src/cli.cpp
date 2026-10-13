@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <exception>
+#include <fstream>
 #include <new>
 #include <ostream>
 #include <stdexcept>
@@ -38,13 +39,14 @@ const char* const usage =
     "Usage: imgfilter <input image> <output.png> <sigma> "
     "[--backend serial|openmp] [--threads N]\n"
     "       imgfilter bench [--sizes N,N,...] [--sigmas S,S,...] [--threads N,N,...]\n"
-    "                       [--runs N]\n"
+    "                       [--runs N] [--csv <results.csv>]\n"
     "\n"
     "The first form blurs one image. bench times the blur of a synthetic square\n"
     "image of each size with each sigma: the serial backend first, then the\n"
     "openmp backend at each thread count. Each is one untimed warm-up, then\n"
     "--runs timed runs (defaults: --sizes 4096 --sigmas 3 --runs 15, and\n"
-    "--threads every count from 1 to the maximum).";
+    "--threads every count from 1 to the maximum). --csv also writes the rows\n"
+    "of the table to a file, replacing it if it exists.";
 
 struct Options {
     Backend backend = Backend::OpenMP;
@@ -219,13 +221,21 @@ int parse_runs(const std::string& text) {
         "--runs must be a whole number, 1 or more, got '" + text + "'");
 }
 
-// Flags come after "bench", in any order, each followed by its value.
-BenchmarkConfig parse_bench_flags(const std::vector<std::string>& args) {
+// What the bench flags ask for.
+struct BenchOptions {
     BenchmarkConfig config;
+    std::string csv_path;   // empty: no CSV file
+};
+
+// Flags come after "bench", in any order, each followed by its value.
+BenchOptions parse_bench_flags(const std::vector<std::string>& args) {
+    BenchOptions options;
+    BenchmarkConfig& config = options.config;
 
     for (std::size_t i = 1; i < args.size(); i += 2) {
         const std::string& flag = args[i];
-        if (flag != "--sizes" && flag != "--sigmas" && flag != "--threads" && flag != "--runs") {
+        if (flag != "--sizes" && flag != "--sigmas" && flag != "--threads" && flag != "--runs" &&
+            flag != "--csv") {
             throw std::invalid_argument("unknown bench argument '" + flag + "'\n" + usage);
         }
 
@@ -240,17 +250,53 @@ BenchmarkConfig parse_bench_flags(const std::vector<std::string>& args) {
             config.sigmas = parse_sigmas(value);
         } else if (flag == "--threads") {
             config.threads = parse_thread_counts(value);
-        } else {
+        } else if (flag == "--runs") {
             config.runs = parse_runs(value);
+        } else {
+            // An empty path would otherwise mean "no CSV" and silently start
+            // a full-size session.
+            if (value.empty()) {
+                throw std::invalid_argument("--csv needs a file path, got ''");
+            }
+            options.csv_path = value;
         }
     }
-    return config;
+    return options;
+}
+
+// One header line, then one line per row. The column order is a contract
+// (later tools read this file), so do not reorder it.
+void write_csv(std::ostream& csv, const std::vector<BenchmarkRow>& rows) {
+    csv << "width,height,sigma,radius,backend,threads,runs,"
+           "median_ms,min_ms,max_ms,speedup,efficiency\n";
+    for (const BenchmarkRow& row : rows) {
+        csv << row.width << ',' << row.height << ',' << row.sigma << ','
+            << row.radius << ',' << backend_name(row.backend) << ','
+            << row.threads << ',' << row.runs << ','
+            << row.median_ms << ',' << row.min_ms << ',' << row.max_ms << ','
+            << row.speedup << ',' << row.efficiency << "\n";
+    }
 }
 
 // args[0] is "bench". Every flag is checked before anything is measured.
 int bench_command(const std::vector<std::string>& args, std::ostream& out) {
-    const BenchmarkConfig config = parse_bench_flags(args);
-    run_benchmark(config, out);
+    const BenchOptions options = parse_bench_flags(args);
+
+    // Opened before anything is measured, so a bad path fails now and not
+    // after a long session.
+    std::ofstream csv;
+    if (!options.csv_path.empty()) {
+        csv.open(options.csv_path);
+        if (!csv) {
+            throw std::runtime_error("cannot open '" + options.csv_path + "' for writing");
+        }
+    }
+
+    const std::vector<BenchmarkRow> rows = run_benchmark(options.config, out);
+
+    if (csv.is_open()) {
+        write_csv(csv, rows);
+    }
     return 0;
 }
 
