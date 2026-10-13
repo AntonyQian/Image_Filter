@@ -26,6 +26,7 @@ const int time_width = 12;
 // 12 keeps a gap before the widest 6-digit number, such as 1.23457e-05.
 const int scaling_width = 12;
 
+// Ends with a flush so piped output shows it before the first row is done.
 void print_column_header(std::ostream& progress) {
     progress << std::setw(size_width) << "size"
              << std::setw(sigma_width) << "sigma"
@@ -37,7 +38,8 @@ void print_column_header(std::ostream& progress) {
              << std::setw(time_width) << "max ms"
              << std::setw(scaling_width) << "speedup"
              << std::setw(scaling_width) << "efficiency"
-             << "\n";
+             << "\n"
+             << std::flush;
 }
 
 // Ends with a flush so a row shows up as soon as its configuration finishes.
@@ -73,8 +75,8 @@ double median_of(const std::vector<double>& sorted_times) {
 
 // What measuring one configuration gives.
 struct Measurement {
-    BenchmarkRow row;   // speedup and efficiency are left for the caller
-    Image warm_up;      // the Warm-up's Destination
+    BenchmarkRow row;            // speedup and efficiency are left for the caller
+    Image warm_up_destination;   // what the Warm-up wrote
 };
 
 // Measures one configuration: one Backend and thread count on `source` with
@@ -90,9 +92,9 @@ Measurement measure(const Image& source, double sigma, Backend backend, int thre
 
     // Warm-up: loads the caches and starts the OpenMP thread pool, so the
     // first timed Run does not pay for them.
-    measurement.warm_up = gaussian_blur(source, sigma, backend, threads);
-    row.width = measurement.warm_up.width;
-    row.height = measurement.warm_up.height;
+    measurement.warm_up_destination = gaussian_blur(source, sigma, backend, threads);
+    row.width = measurement.warm_up_destination.width;
+    row.height = measurement.warm_up_destination.height;
 
     std::vector<double> times_ms;
     times_ms.reserve(static_cast<std::size_t>(runs));
@@ -127,7 +129,7 @@ void set_scaling(BenchmarkRow& row, double reference_median_ms) {
 // naming the configuration if it is not, so no timing is reported for a
 // Backend that gives the wrong answer. Called outside every timed region.
 void verify_against_reference(const Measurement& measurement, const Image& reference_destination) {
-    const Image& destination = measurement.warm_up;
+    const Image& destination = measurement.warm_up_destination;
     if (destination.width == reference_destination.width &&
         destination.height == reference_destination.height &&
         destination.channels == reference_destination.channels &&
@@ -173,9 +175,19 @@ Image make_synthetic_image(int size) {
     return image;
 }
 
-std::vector<BenchmarkRow> run_benchmark(const BenchmarkConfig& config, std::ostream& progress) {
+std::vector<BenchmarkRow> run_benchmark(const BenchmarkConfig& config, std::ostream& progress,
+                                        const RowCallback& on_row) {
     std::vector<BenchmarkRow> rows;
     print_column_header(progress);
+
+    // A finished row: kept, handed to the caller, then shown.
+    const auto report = [&](const BenchmarkRow& row) {
+        rows.push_back(row);
+        if (on_row) {
+            on_row(row);
+        }
+        print_row(progress, row);
+    };
 
     for (const int size : config.sizes) {
         const Image source = make_synthetic_image(size);
@@ -186,19 +198,17 @@ std::vector<BenchmarkRow> run_benchmark(const BenchmarkConfig& config, std::ostr
             Measurement reference = measure(source, sigma, Backend::Serial, 1, config.runs);
             const double reference_median_ms = reference.row.median_ms;
             set_scaling(reference.row, reference_median_ms);
-            rows.push_back(reference.row);
-            print_row(progress, rows.back());
+            report(reference.row);
 
             // The thread Sweep: every other Backend at every thread count.
             for (const Backend backend : swept_backends) {
-                for (const int threads : config.threads) {
+                for (const int threads : config.thread_counts) {
                     Measurement measurement = measure(source, sigma, backend, threads, config.runs);
                     // Before the row is printed: a wrong Destination gets no
                     // timings.
-                    verify_against_reference(measurement, reference.warm_up);
+                    verify_against_reference(measurement, reference.warm_up_destination);
                     set_scaling(measurement.row, reference_median_ms);
-                    rows.push_back(measurement.row);
-                    print_row(progress, rows.back());
+                    report(measurement.row);
                 }
             }
         }

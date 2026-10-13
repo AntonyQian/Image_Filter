@@ -64,19 +64,27 @@ Backend parse_backend(const std::string& text) {
                                 "', valid values are: serial, openmp");
 }
 
-int parse_threads(const std::string& text) {
+// True, with the number in `value`, if `text` is a whole number, 1 or more,
+// that fits in an int.
+bool to_positive_int(const std::string& text, int& value) {
     try {
         // consumed rejects "4abc" and "2.5"
         std::size_t consumed = 0;
-        const int threads = std::stoi(text, &consumed);
-        if (consumed == text.size() && threads >= 1) {
-            return threads;
-        }
+        value = std::stoi(text, &consumed);
+        return consumed == text.size() && value >= 1;
     } catch (const std::exception&) {
-        // fall through to the error below
+        return false;   // not a number, or too big for an int
     }
-    throw std::invalid_argument(
-        "--threads must be a whole number, 1 or more, got '" + text + "'");
+}
+
+// The value of a flag such as --threads 4 or --runs 15.
+int parse_positive_int(const std::string& flag, const std::string& text) {
+    int value = 0;
+    if (!to_positive_int(text, value)) {
+        throw std::invalid_argument(
+            flag + " must be a whole number, 1 or more, got '" + text + "'");
+    }
+    return value;
 }
 
 // Flags come after the three positional arguments, each followed by its value.
@@ -97,7 +105,7 @@ Options parse_options(const std::vector<std::string>& args) {
         if (flag == "--backend") {
             options.backend = parse_backend(value);
         } else {
-            options.threads = parse_threads(value);
+            options.threads = parse_positive_int(flag, value);
         }
     }
 
@@ -129,28 +137,25 @@ std::vector<std::string> split_list(const std::string& text) {
     }
 }
 
-std::vector<int> parse_sizes(const std::string& text) {
-    std::vector<int> sizes;
-    try {
-        for (const std::string& item : split_list(text)) {
-            // consumed rejects "16abc" and "2.5"
-            std::size_t consumed = 0;
-            const int size = std::stoi(item, &consumed);
-            if (consumed != item.size() || size < 1) {
-                sizes.clear();
-                break;
-            }
-            sizes.push_back(size);
+// The value of a flag such as --sizes 1024,2048. `example` is a valid value,
+// shown in the error message.
+std::vector<int> parse_positive_int_list(const std::string& flag, const std::string& example,
+                                         const std::string& text) {
+    std::vector<int> values;
+    for (const std::string& item : split_list(text)) {
+        int value = 0;
+        if (!to_positive_int(item, value)) {
+            values.clear();
+            break;
         }
-    } catch (const std::exception&) {
-        sizes.clear();   // not a number, or too big for an int
+        values.push_back(value);
     }
-    if (sizes.empty()) {
+    if (values.empty()) {
         throw std::invalid_argument(
-            "--sizes must be a comma-separated list of whole numbers, each 1 or more "
-            "(for example 1024,2048), got '" + text + "'");
+            flag + " must be a comma-separated list of whole numbers, each 1 or more "
+            "(for example " + example + "), got '" + text + "'");
     }
-    return sizes;
+    return values;
 }
 
 std::vector<double> parse_sigmas(const std::string& text) {
@@ -182,45 +187,6 @@ std::vector<double> parse_sigmas(const std::string& text) {
     return sigmas;
 }
 
-std::vector<int> parse_thread_counts(const std::string& text) {
-    std::vector<int> thread_counts;
-    try {
-        for (const std::string& item : split_list(text)) {
-            // consumed rejects "4abc" and "2.5"
-            std::size_t consumed = 0;
-            const int threads = std::stoi(item, &consumed);
-            if (consumed != item.size() || threads < 1) {
-                thread_counts.clear();
-                break;
-            }
-            thread_counts.push_back(threads);
-        }
-    } catch (const std::exception&) {
-        thread_counts.clear();   // not a number, or too big for an int
-    }
-    if (thread_counts.empty()) {
-        throw std::invalid_argument(
-            "--threads must be a comma-separated list of whole numbers, each 1 or more "
-            "(for example 1,2,4,8), got '" + text + "'");
-    }
-    return thread_counts;
-}
-
-int parse_runs(const std::string& text) {
-    try {
-        // consumed rejects "3abc" and "2.5"
-        std::size_t consumed = 0;
-        const int runs = std::stoi(text, &consumed);
-        if (consumed == text.size() && runs >= 1) {
-            return runs;
-        }
-    } catch (const std::exception&) {
-        // fall through to the error below
-    }
-    throw std::invalid_argument(
-        "--runs must be a whole number, 1 or more, got '" + text + "'");
-}
-
 // What the bench flags ask for.
 struct BenchOptions {
     BenchmarkConfig config;
@@ -245,13 +211,13 @@ BenchOptions parse_bench_flags(const std::vector<std::string>& args) {
         const std::string& value = args[i + 1];
 
         if (flag == "--sizes") {
-            config.sizes = parse_sizes(value);
+            config.sizes = parse_positive_int_list(flag, "1024,2048", value);
         } else if (flag == "--sigmas") {
             config.sigmas = parse_sigmas(value);
         } else if (flag == "--threads") {
-            config.threads = parse_thread_counts(value);
+            config.thread_counts = parse_positive_int_list(flag, "1,2,4,8", value);
         } else if (flag == "--runs") {
-            config.runs = parse_runs(value);
+            config.runs = parse_positive_int(flag, value);
         } else {
             // An empty path would otherwise mean "no CSV" and silently start
             // a full-size session.
@@ -264,18 +230,23 @@ BenchOptions parse_bench_flags(const std::vector<std::string>& args) {
     return options;
 }
 
-// One header line, then one line per row. The column order is a contract
-// (later tools read this file), so do not reorder it.
-void write_csv(std::ostream& csv, const std::vector<BenchmarkRow>& rows) {
+// The CSV file is one header line, then one line per row. The column order
+// is a contract (later tools read this file), so do not reorder it.
+// Both functions end with a flush, so a session that stops early still leaves
+// a valid file holding every row measured so far.
+void write_csv_header(std::ostream& csv) {
     csv << "width,height,sigma,radius,backend,threads,runs,"
-           "median_ms,min_ms,max_ms,speedup,efficiency\n";
-    for (const BenchmarkRow& row : rows) {
-        csv << row.width << ',' << row.height << ',' << row.sigma << ','
-            << row.radius << ',' << backend_name(row.backend) << ','
-            << row.threads << ',' << row.runs << ','
-            << row.median_ms << ',' << row.min_ms << ',' << row.max_ms << ','
-            << row.speedup << ',' << row.efficiency << "\n";
-    }
+           "median_ms,min_ms,max_ms,speedup,efficiency\n"
+        << std::flush;
+}
+
+void write_csv_row(std::ostream& csv, const BenchmarkRow& row) {
+    csv << row.width << ',' << row.height << ',' << row.sigma << ','
+        << row.radius << ',' << backend_name(row.backend) << ','
+        << row.threads << ',' << row.runs << ','
+        << row.median_ms << ',' << row.min_ms << ',' << row.max_ms << ','
+        << row.speedup << ',' << row.efficiency << "\n"
+        << std::flush;
 }
 
 // The compiler's name and version, from macros the compiler defines itself.
@@ -290,15 +261,21 @@ const char* const compiler_version = "unknown";
 
 // IMGFILTER_BUILD_TYPE and IMGFILTER_COMPILE_FLAGS come from CMakeLists.txt,
 // so they are what this build was configured with.
-// No line starts with a number, so none can be mistaken for a table row.
-void print_environment(std::ostream& out, int runs) {
+std::string build_type_name() {
     const std::string build_type = IMGFILTER_BUILD_TYPE;
+    return build_type.empty() ? "(none)" : build_type;
+}
+
+// No line starts with a number, so none can be mistaken for a table row.
+// Ends with a flush so piped output shows it before anything is measured.
+void print_environment(std::ostream& out, int runs) {
     out << "compiler:    " << compiler_version << "\n"
-        << "build type:  " << (build_type.empty() ? "(none)" : build_type) << "\n"
+        << "build type:  " << build_type_name() << "\n"
         << "flags:       " << IMGFILTER_COMPILE_FLAGS << "\n"
         << "max threads: " << omp_get_max_threads() << "\n"
         << "runs:        " << runs << "\n"
-        << "\n";
+        << "\n"
+        << std::flush;
 }
 
 // GCC and Clang define __OPTIMIZE__ at -O1 and above, so this follows the
@@ -306,9 +283,7 @@ void print_environment(std::ostream& out, int runs) {
 // The benchmark still runs: the timings are just not worth quoting.
 void warn_if_unoptimised(std::ostream& err) {
 #ifndef __OPTIMIZE__
-    const std::string build_type = IMGFILTER_BUILD_TYPE;
-    err << "Warning: this build is not optimised (build type: "
-        << (build_type.empty() ? "(none)" : build_type)
+    err << "Warning: this build is not optimised (build type: " << build_type_name()
         << "), so these timings say nothing about real speed. "
            "Rebuild with -DCMAKE_BUILD_TYPE=Release before quoting any numbers.\n";
 #else
@@ -323,19 +298,23 @@ int bench_command(const std::vector<std::string>& args, std::ostream& out, std::
     // Opened before anything is printed or measured, so a bad path fails now
     // and not after a long session.
     std::ofstream csv;
+    RowCallback on_row;   // empty: no CSV file
     if (!options.csv_path.empty()) {
         csv.open(options.csv_path);
         if (!csv) {
             throw std::runtime_error("cannot open '" + options.csv_path + "' for writing");
         }
+        write_csv_header(csv);
+        on_row = [&csv](const BenchmarkRow& row) { write_csv_row(csv, row); };
     }
 
     warn_if_unoptimised(err);
     print_environment(out, options.config.runs);
-    const std::vector<BenchmarkRow> rows = run_benchmark(options.config, out);
+    run_benchmark(options.config, out, on_row);
 
-    if (csv.is_open()) {
-        write_csv(csv, rows);
+    // A failed write (a full disk, say) only sets the stream's error state.
+    if (csv.is_open() && !csv) {
+        throw std::runtime_error("could not write the results to '" + options.csv_path + "'");
     }
     return 0;
 }
