@@ -7,6 +7,9 @@ enum class Backend {
     OpenMP,   // rows split between threads
 };
 
+// The name the --backend flag and the benchmark table use: "serial" or "openmp".
+const char* backend_name(Backend backend);
+
 // Blurs `source` and returns the Destination, a new Image of the same size.
 // `threads` is only used by the OpenMP Backend, where it must be 1 or more.
 // Borders are clamp-to-edge.
