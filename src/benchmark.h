@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <iosfwd>
 #include <vector>
 
@@ -11,13 +12,13 @@
 std::vector<int> default_thread_counts();
 
 // What to benchmark. Every size is combined with every sigma, and each
-// combination gets a thread Sweep over `threads`.
+// combination gets a thread Sweep over `thread_counts`.
 // The values must already be valid: sizes 1 or more, sigmas finite and
-// positive, threads 1 or more, runs 1 or more.
+// positive, thread counts 1 or more, runs 1 or more.
 struct BenchmarkConfig {
     std::vector<int> sizes = {4096};      // side of the square synthetic Image
     std::vector<double> sigmas = {3.0};
-    std::vector<int> threads = default_thread_counts();
+    std::vector<int> thread_counts = default_thread_counts();
     int runs = 15;                        // timed Runs per configuration
 };
 
@@ -53,11 +54,15 @@ Image make_synthetic_image(int size);
 // row's median; efficiency is speedup divided by the thread count.
 // Before a row is printed, the Destination of its Warm-up is compared byte
 // for byte with the Reference Destination of the same size and sigma.
-// Writes the column header to `progress`, then each row as soon as it is done.
-// Returns the same rows.
+// Writes the column header to `progress`, then each row as soon as it is done,
+// flushing after each. Returns the same rows.
+// `on_row`, if given, is called with each finished row just before that row
+// is written to `progress`, so the caller can record rows as the session goes.
 //
 // Throws std::runtime_error naming the size, sigma, Backend and thread count
 // if a Destination differs from the Reference; the rows before it have
-// already been written. Also throws what gaussian_blur throws, and
-// std::bad_alloc if an Image does not fit in memory.
-std::vector<BenchmarkRow> run_benchmark(const BenchmarkConfig& config, std::ostream& progress);
+// already been written and passed to `on_row`. Also throws what gaussian_blur
+// throws, and std::bad_alloc if an Image does not fit in memory.
+using RowCallback = std::function<void(const BenchmarkRow&)>;
+std::vector<BenchmarkRow> run_benchmark(const BenchmarkConfig& config, std::ostream& progress,
+                                        const RowCallback& on_row = {});
