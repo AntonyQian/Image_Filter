@@ -3,14 +3,22 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <sstream>
 #include <stdexcept>
 
 #include "weights.h"
 
 namespace {
 
-// Computes row y of the Destination. Every Backend goes through here, so the
+// Computes row y of the Destination. Both CPU Backends go through here, so the
 // sums happen in the same order and the outputs match bit for bit.
+//
+// This is the summation contract every Backend follows, the two CUDA Kernels
+// included (cuda_blur.cu repeats it line for line): start from 0.0f; for each
+// row offset dy from -radius to +radius, and inside it each column offset dx
+// from -radius to +radius, add Weight * Source Pixel (coordinates clamped to
+// the Image); then add 0.5f, truncate to int and clamp to 0..255. Float
+// addition is not associative, so a different order could change the last bit.
 void blur_row(const Image& source, const Weights& weights, int y, Image& destination) {
     const int radius = weights.radius;
 
@@ -59,11 +67,29 @@ void blur_openmp(const Image& source, const Weights& weights, int threads,
 
 }  // namespace
 
-Image gaussian_blur(const Image& source, double sigma, Backend backend, int threads) {
+void check_backend_supported(Backend backend, double sigma) {
+    if (!is_cuda(backend)) {
+        return;
+    }
+    if (!cuda_built()) {
+        throw std::invalid_argument(no_cuda_message);
+    }
+    if (backend == Backend::CudaTiled && radius_for_sigma(sigma) > cuda_tiled_max_radius) {
+        std::ostringstream message;
+        message << "sigma " << sigma << " is too large for the cuda-tiled backend, whose "
+                << "Weights must fit in 64 KB of constant memory: the largest allowed "
+                << "sigma is " << cuda_tiled_max_sigma << " (cuda-naive has no such limit)";
+        throw std::invalid_argument(message.str());
+    }
+}
+
+Image gaussian_blur(const Image& source, double sigma, Backend backend, int threads,
+                    GpuTimings* timings) {
     // Written this way so NaN is rejected too.
     if (!(std::isfinite(sigma) && sigma > 0.0)) {
         throw std::invalid_argument("sigma must be a finite number greater than 0");
     }
+    check_backend_supported(backend, sigma);
 
     if (backend == Backend::OpenMP && threads < 1) {
         throw std::invalid_argument("threads must be 1 or more");
@@ -84,6 +110,12 @@ Image gaussian_blur(const Image& source, double sigma, Backend backend, int thre
         case Backend::OpenMP:
             blur_openmp(source, weights, threads, destination);
             break;
+        case Backend::CudaNaive:
+            cuda_blur(source, weights, CudaKernel::Naive, destination, timings);
+            break;
+        case Backend::CudaTiled:
+            cuda_blur(source, weights, CudaKernel::Tiled, destination, timings);
+            break;
     }
 
     return destination;
@@ -93,6 +125,12 @@ const char* backend_name(Backend backend) {
     switch (backend) {
         case Backend::Serial: return "serial";
         case Backend::OpenMP: return "openmp";
+        case Backend::CudaNaive: return "cuda-naive";
+        case Backend::CudaTiled: return "cuda-tiled";
     }
     return "unknown";  // not reachable; keeps -Wreturn-type quiet
+}
+
+bool is_cuda(Backend backend) {
+    return backend == Backend::CudaNaive || backend == Backend::CudaTiled;
 }

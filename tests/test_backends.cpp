@@ -1,5 +1,6 @@
 // The OpenMP Backend must produce the serial Reference's Destination bit for
-// bit, whatever the thread count.
+// bit, whatever the thread count, and so must the CUDA Backends in a CUDA
+// build. A build without CUDA must reject them cleanly.
 
 #include "test_utilities.hpp"
 
@@ -59,9 +60,70 @@ static void test_more_threads_than_rows_still_works() {
     }
 }
 
+#ifdef IMGFILTER_HAS_CUDA
+
+static void test_cuda_output_is_byte_identical_to_serial() {
+    // 37 x 53 is not a multiple of the 16 x 16 block in either direction, so
+    // the last blocks stick out past the Image. 5 x 3 at sigma 5 (a 31-wide
+    // window) is smaller than one Tile, and every read crosses the border.
+    struct Case {
+        int width;
+        int height;
+        const char* sigma;
+    };
+    const Case cases[] = {{37, 53, "1"}, {37, 53, "3"}, {37, 53, "5"}, {5, 3, "5"}};
+
+    const fs::path dir = temp_dir("serial_equals_cuda");
+    const std::string input = (dir / "noise.png").string();
+    const std::string reference = (dir / "serial.png").string();
+    const std::string gpu = (dir / "cuda.png").string();
+
+    for (const Case& c : cases) {
+        save_image(input, make_noise(c.width, c.height));
+        CHECK(run_cli({input, reference, c.sigma, "--backend", "serial"}).exit_code == 0);
+        const std::string expected = read_file_bytes(reference);
+        CHECK(!expected.empty());
+
+        for (const char* backend : {"cuda-naive", "cuda-tiled"}) {
+            fs::remove(gpu);   // never compare against a stale file
+
+            const RunResult result = run_cli({input, gpu, c.sigma, "--backend", backend});
+
+            CHECK(result.exit_code == 0);
+            if (result.exit_code != 0) {
+                std::cerr << backend << ": " << result.err;
+            }
+            CHECK(read_file_bytes(gpu) == expected);
+        }
+    }
+}
+
+#else
+
+static void test_build_without_cuda_rejects_cuda_backends() {
+    const fs::path dir = temp_dir("no_cuda_rejects");
+    const std::string input = (dir / "in.png").string();
+    const std::string output = (dir / "out.png").string();
+    save_image(input, make_noise(5, 3));
+
+    const RunResult result = run_cli({input, output, "1", "--backend", "cuda-naive"});
+
+    CHECK(result.exit_code != 0);
+    CHECK(contains(result.err, "no CUDA support"));
+    CHECK(contains(result.err, "-DIMGFILTER_CUDA=ON"));
+    CHECK(!fs::exists(output));
+}
+
+#endif
+
 int main() {
     return run_tests({
         test_openmp_output_is_byte_identical_to_serial,
         test_more_threads_than_rows_still_works,
+#ifdef IMGFILTER_HAS_CUDA
+        test_cuda_output_is_byte_identical_to_serial,
+#else
+        test_build_without_cuda_rejects_cuda_backends,
+#endif
     });
 }

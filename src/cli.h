@@ -7,15 +7,19 @@
 // The whole command-line tool as a function, so tests can call it directly.
 //
 // args: the arguments without the program name, in one of two forms:
-//         input output sigma [--backend serial|openmp] [--threads N]
+//         input output sigma [--backend serial|openmp|cuda-naive|cuda-tiled]
+//               [--threads N]
 //           blurs one image. Default is the openmp Backend on
-//           omp_get_max_threads() threads.
+//           omp_get_max_threads() threads. The CUDA Backends ignore --threads,
+//           need a CUDA build, and print their Transfer and Kernel times.
 //         bench [--sizes N,N,...] [--sigmas S,S,...] [--threads N,N,...]
-//               [--runs N] [--csv <results.csv>]
+//               [--backends B,B,...] [--runs N] [--csv <results.csv>]
 //           runs the benchmark on synthetic Images and prints a table.
 //           Defaults: --sizes 4096, --sigmas 3, --threads every count from 1
-//           to omp_get_max_threads(), --runs 15, and no CSV file. --csv also
-//           writes the table's rows to that file, replacing it if it exists.
+//           to omp_get_max_threads(), --backends openmp (plus cuda-naive and
+//           cuda-tiled in a CUDA build), --runs 15, and no CSV file. The
+//           Reference is always measured. --csv also writes the table's rows
+//           to that file, replacing it if it exists.
 //           A Source file literally named "bench" needs a path prefix
 //           (./bench).
 // out, err: where normal output and error messages go.

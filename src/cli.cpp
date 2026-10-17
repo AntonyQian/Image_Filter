@@ -1,11 +1,13 @@
 #include "cli.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <exception>
 #include <fstream>
 #include <new>
+#include <optional>
 #include <ostream>
 #include <stdexcept>
 
@@ -37,31 +39,48 @@ double parse_sigma(const std::string& text) {
 
 const char* const usage =
     "Usage: imgfilter <input image> <output.png> <sigma> "
-    "[--backend serial|openmp] [--threads N]\n"
+    "[--backend serial|openmp|cuda-naive|cuda-tiled] [--threads N]\n"
     "       imgfilter bench [--sizes N,N,...] [--sigmas S,S,...] [--threads N,N,...]\n"
-    "                       [--runs N] [--csv <results.csv>]\n"
+    "                       [--backends B,B,...] [--runs N] [--csv <results.csv>]\n"
     "\n"
-    "The first form blurs one image. bench times the blur of a synthetic square\n"
-    "image of each size with each sigma: the serial backend first, then the\n"
-    "openmp backend at each thread count. Each is one untimed warm-up, then\n"
-    "--runs timed runs (defaults: --sizes 4096 --sigmas 3 --runs 15, and\n"
-    "--threads every count from 1 to the maximum). --csv also writes the rows\n"
-    "of the table to a file, replacing it if it exists.";
+    "The first form blurs one image. --threads is only used by openmp. The\n"
+    "cuda-naive and cuda-tiled backends run on an NVIDIA GPU and need a build\n"
+    "configured with -DIMGFILTER_CUDA=ON; cuda-tiled allows sigma up to 21.\n"
+    "\n"
+    "bench times the blur of a synthetic square image of each size with each\n"
+    "sigma: the serial backend first, then each of --backends in the order\n"
+    "given (from openmp, cuda-naive, cuda-tiled), openmp at each thread count\n"
+    "and a cuda backend once. Each is one untimed warm-up, then --runs timed\n"
+    "runs. Defaults: --sizes 4096 --sigmas 3 --runs 15, --threads every count\n"
+    "from 1 to the maximum, --backends openmp (openmp,cuda-naive,cuda-tiled in\n"
+    "a CUDA build). --csv also writes the rows of the table to a file,\n"
+    "replacing it if it exists.";
 
 struct Options {
     Backend backend = Backend::OpenMP;
     int threads = omp_get_max_threads();
 };
 
-Backend parse_backend(const std::string& text) {
-    if (text == "serial") {
-        return Backend::Serial;
+// Every Backend, in the order the usage text lists them.
+const Backend all_backends[] = {Backend::Serial, Backend::OpenMP, Backend::CudaNaive,
+                                Backend::CudaTiled};
+
+// The Backend whose name is `text`, or nothing.
+std::optional<Backend> find_backend(const std::string& text) {
+    for (const Backend backend : all_backends) {
+        if (text == backend_name(backend)) {
+            return backend;
+        }
     }
-    if (text == "openmp") {
-        return Backend::OpenMP;
+    return std::nullopt;
+}
+
+Backend parse_backend(const std::string& text) {
+    if (const std::optional<Backend> backend = find_backend(text)) {
+        return *backend;
     }
     throw std::invalid_argument("unknown backend '" + text +
-                                "', valid values are: serial, openmp");
+                                "', valid values are: serial, openmp, cuda-naive, cuda-tiled");
 }
 
 // True, with the number in `value`, if `text` is a whole number, 1 or more,
@@ -109,7 +128,8 @@ Options parse_options(const std::vector<std::string>& args) {
         }
     }
 
-    // Serial ignores --threads, so report the count actually used.
+    // Serial ignores --threads, so report the count actually used. The CUDA
+    // Backends ignore it too, and the summary shows no thread count for them.
     if (options.backend == Backend::Serial) {
         options.threads = 1;
     }
@@ -187,6 +207,27 @@ std::vector<double> parse_sigmas(const std::string& text) {
     return sigmas;
 }
 
+// The value of --backends: the Backends measured after the Reference. The
+// Reference is always measured first, so serial is not accepted here.
+std::vector<Backend> parse_bench_backends(const std::string& text) {
+    std::vector<Backend> backends;
+    for (const std::string& item : split_list(text)) {
+        const std::optional<Backend> backend = find_backend(item);
+        if (!backend || *backend == Backend::Serial) {
+            backends.clear();
+            break;
+        }
+        backends.push_back(*backend);
+    }
+    if (backends.empty()) {
+        throw std::invalid_argument(
+            "--backends must be a comma-separated list of openmp, cuda-naive and "
+            "cuda-tiled (for example openmp,cuda-tiled; serial is always measured "
+            "first), got '" + text + "'");
+    }
+    return backends;
+}
+
 // What the bench flags ask for.
 struct BenchOptions {
     BenchmarkConfig config;
@@ -200,8 +241,8 @@ BenchOptions parse_bench_flags(const std::vector<std::string>& args) {
 
     for (std::size_t i = 1; i < args.size(); i += 2) {
         const std::string& flag = args[i];
-        if (flag != "--sizes" && flag != "--sigmas" && flag != "--threads" && flag != "--runs" &&
-            flag != "--csv") {
+        if (flag != "--sizes" && flag != "--sigmas" && flag != "--threads" &&
+            flag != "--backends" && flag != "--runs" && flag != "--csv") {
             throw std::invalid_argument("unknown bench argument '" + flag + "'\n" + usage);
         }
 
@@ -216,6 +257,8 @@ BenchOptions parse_bench_flags(const std::vector<std::string>& args) {
             config.sigmas = parse_sigmas(value);
         } else if (flag == "--threads") {
             config.thread_counts = parse_positive_int_list(flag, "1,2,4,8", value);
+        } else if (flag == "--backends") {
+            config.backends = parse_bench_backends(value);
         } else if (flag == "--runs") {
             config.runs = parse_positive_int(flag, value);
         } else {
@@ -234,19 +277,39 @@ BenchOptions parse_bench_flags(const std::vector<std::string>& args) {
 // is a contract (later tools read this file), so do not reorder it.
 // Both functions end with a flush, so a session that stops early still leaves
 // a valid file holding every row measured so far.
+// New columns only ever go at the end. An empty field means "does not apply":
+// threads and efficiency in a CUDA row, the three GPU times in a CPU row.
 void write_csv_header(std::ostream& csv) {
     csv << "width,height,sigma,radius,backend,threads,runs,"
-           "median_ms,min_ms,max_ms,speedup,efficiency\n"
+           "median_ms,min_ms,max_ms,speedup,efficiency,"
+           "h2d_ms,kernel_ms,d2h_ms\n"
         << std::flush;
+}
+
+// The value, or nothing at all for an empty field.
+template <typename T>
+void write_csv_field(std::ostream& csv, const std::optional<T>& value) {
+    if (value) {
+        csv << *value;
+    }
 }
 
 void write_csv_row(std::ostream& csv, const BenchmarkRow& row) {
     csv << row.width << ',' << row.height << ',' << row.sigma << ','
-        << row.radius << ',' << backend_name(row.backend) << ','
-        << row.threads << ',' << row.runs << ','
+        << row.radius << ',' << backend_name(row.backend) << ',';
+    write_csv_field(csv, row.threads);
+    csv << ',' << row.runs << ','
         << row.median_ms << ',' << row.min_ms << ',' << row.max_ms << ','
-        << row.speedup << ',' << row.efficiency << "\n"
-        << std::flush;
+        << row.speedup << ',';
+    write_csv_field(csv, row.efficiency);
+    csv << ',';
+    if (row.gpu_timings) {
+        csv << row.gpu_timings->h2d_ms << ',' << row.gpu_timings->kernel_ms << ','
+            << row.gpu_timings->d2h_ms;
+    } else {
+        csv << ",,";
+    }
+    csv << "\n" << std::flush;
 }
 
 // The compiler's name and version, from macros the compiler defines itself.
@@ -266,16 +329,72 @@ std::string build_type_name() {
     return build_type.empty() ? "(none)" : build_type;
 }
 
+#ifdef IMGFILTER_HAS_CUDA
+// CUDA gives a version as one number, 1000 * major + 10 * minor: 12040 is 12.4.
+std::string cuda_version_text(int version) {
+    return std::to_string(version / 1000) + "." + std::to_string(version % 1000 / 10);
+}
+#endif
+
+// The CUDA lines of the bench header, in a CUDA build only. The macros come
+// from CMakeLists.txt, like IMGFILTER_COMPILE_FLAGS. `gpu` is empty when no
+// usable GPU was found (and none was needed).
+void print_gpu_environment(std::ostream& out, const std::optional<CudaDeviceInfo>& gpu) {
+#ifdef IMGFILTER_HAS_CUDA
+    out << "cuda:        " << IMGFILTER_CUDA_COMPILER << "\n"
+        << "cuda flags:  " << IMGFILTER_CUDA_FLAGS << "\n"
+        << "cuda archs:  " << IMGFILTER_CUDA_ARCHITECTURES << "\n";
+    if (!gpu) {
+        out << "gpu:         none usable\n";
+        return;
+    }
+    out << "gpu:         " << gpu->name << "\n"
+        << "compute:     " << gpu->compute_major << "." << gpu->compute_minor << "\n"
+        << "SMs:         " << gpu->multiprocessors << "\n"
+        << "gpu memory:  " << gpu->total_memory_bytes / (1024 * 1024) << " MiB\n"
+        << "driver:      CUDA " << cuda_version_text(gpu->driver_version) << "\n"
+        << "runtime:     CUDA " << cuda_version_text(gpu->runtime_version) << "\n";
+#else
+    (void)out;
+    (void)gpu;
+#endif
+}
+
 // No line starts with a number, so none can be mistaken for a table row.
 // Ends with a flush so piped output shows it before anything is measured.
-void print_environment(std::ostream& out, int runs) {
+void print_environment(std::ostream& out, int runs, const std::optional<CudaDeviceInfo>& gpu) {
     out << "compiler:    " << compiler_version << "\n"
         << "build type:  " << build_type_name() << "\n"
         << "flags:       " << IMGFILTER_COMPILE_FLAGS << "\n"
-        << "max threads: " << omp_get_max_threads() << "\n"
-        << "runs:        " << runs << "\n"
+        << "max threads: " << omp_get_max_threads() << "\n";
+    print_gpu_environment(out, gpu);
+    out << "runs:        " << runs << "\n"
         << "\n"
         << std::flush;
+}
+
+// Checks, before anything is measured, that every requested Backend can run
+// every requested sigma, and finds the GPU if a CUDA Backend is requested
+// (throwing, with the CUDA error, if there is none). Returns the GPU's
+// description for the header. A CUDA build looks for one even when no CUDA
+// Backend is requested, but then not finding one is fine.
+std::optional<CudaDeviceInfo> check_bench_backends(const BenchmarkConfig& config) {
+    for (const Backend backend : config.backends) {
+        for (const double sigma : config.sigmas) {
+            check_backend_supported(backend, sigma);   // no CUDA, or sigma too large
+        }
+    }
+    if (std::any_of(config.backends.begin(), config.backends.end(), is_cuda)) {
+        return cuda_device_info();
+    }
+    if (cuda_built()) {
+        try {
+            return cuda_device_info();
+        } catch (const std::exception&) {
+            // no usable GPU, and none is needed
+        }
+    }
+    return std::nullopt;
 }
 
 // GCC and Clang define __OPTIMIZE__ at -O1 and above, so this follows the
@@ -294,6 +413,7 @@ void warn_if_unoptimised(std::ostream& err) {
 // args[0] is "bench". Every flag is checked before anything is measured.
 int bench_command(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
     const BenchOptions options = parse_bench_flags(args);
+    const std::optional<CudaDeviceInfo> gpu = check_bench_backends(options.config);
 
     // Opened before anything is printed or measured, so a bad path fails now
     // and not after a long session.
@@ -309,7 +429,7 @@ int bench_command(const std::vector<std::string>& args, std::ostream& out, std::
     }
 
     warn_if_unoptimised(err);
-    print_environment(out, options.config.runs);
+    print_environment(out, options.config.runs, gpu);
     run_benchmark(options.config, out, on_row);
 
     // A failed write (a full disk, say) only sets the stream's error state.
@@ -332,11 +452,20 @@ int blur_command(const std::vector<std::string>& args, std::ostream& out, std::o
 
     const double sigma = parse_sigma(args[2]);
     const Options options = parse_options(args);
+    // Before loading anything: a build without CUDA, or a sigma too large for
+    // cuda-tiled, fails here and writes no output file. A bad sigma is left
+    // for gaussian_blur to reject with its own message.
+    if (std::isfinite(sigma) && sigma > 0.0) {
+        check_backend_supported(options.backend, sigma);
+    }
     const Image source = load_image(input_path);
+    const bool gpu = is_cuda(options.backend);
 
     // Time only the blur, not the disk I/O.
+    GpuTimings timings;
     const auto start = std::chrono::steady_clock::now();
-    const Image destination = gaussian_blur(source, sigma, options.backend, options.threads);
+    const Image destination = gaussian_blur(source, sigma, options.backend, options.threads,
+                                            gpu ? &timings : nullptr);
     const auto stop = std::chrono::steady_clock::now();
     const std::chrono::duration<double, std::milli> elapsed = stop - start;
 
@@ -345,10 +474,20 @@ int blur_command(const std::vector<std::string>& args, std::ostream& out, std::o
     out << "Blurred " << source.width << "x" << source.height
         << " image, sigma " << sigma
         << ", radius " << radius_for_sigma(sigma)
-        << ", backend " << backend_name(options.backend)
-        << ", threads " << options.threads
-        << ", " << elapsed.count() << " ms"
-        << ", saved to " << output_path << "\n";
+        << ", backend " << backend_name(options.backend);
+    if (gpu) {
+        // The total is the Host clock around the whole call, so it also holds
+        // the Device allocation and freeing that the three parts leave out.
+        out << ", GPU " << cuda_device_info().name
+            << ", " << elapsed.count() << " ms"
+            << " (host-to-device " << timings.h2d_ms << " ms"
+            << ", kernel " << timings.kernel_ms << " ms"
+            << ", device-to-host " << timings.d2h_ms << " ms)";
+    } else {
+        out << ", threads " << options.threads
+            << ", " << elapsed.count() << " ms";
+    }
+    out << ", saved to " << output_path << "\n";
     return 0;
 }
 
